@@ -1,0 +1,93 @@
+:root {
+  color-scheme: dark;
+  font-family: 'Sora', 'Segoe UI', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  --bg-gradient: radial-gradient(circle at top, #1e293b, #020617 60%);
+  --fg: #f8fafc;
+  --panel-major: rgba(15, 23, 42, 0.65);
+  --panel: rgba(15, 23, 42, 0.5);
+  --panel-minor: rgba(15, 23, 42, 0.35);
+  --panel-focus: rgba(165, 180, 252, 0.15);
+  --panel-overlay: rgba(15, 23, 42, 0.85);
+  --accent-surface: rgba(148, 163, 184, 0.2);
+  --accent: #a5b4fc;
+  --accent-contrast: #111827;
+  --border: rgba(148, 163, 184, 0.4);
+  --shadow-strong: rgba(0, 0, 0, 0.3);
+  --shadow-floating: rgba(0, 0, 0, 0.25);
+}
+
+html[data-theme='light'] {
+  color-scheme: light;
+  --bg-gradient: radial-gradient(circle at top, #ffffff, #e2e8f0 60%);
+  --fg: #0f172a;
+  --panel-major: rgba(255, 255, 255, 0.9);
+  --panel: rgba(255, 255, 255, 0.8);
+  --panel-minor: rgba(255, 255, 255, 0.65);
+  --panel-focus: rgba(96, 165, 250, 0.2);
+  --panel-overlay: rgba(255, 255, 255, 0.95);
+  --accent-surface: rgba(59, 130, 246, 0.2);
+  --accent-contrast: #0f172a;
+  --border: rgba(99, 102, 241, 0.3);
+  --shadow-strong: rgba(15, 23, 42, 0.2);
+  --shadow-floating: rgba(15, 23, 42, 0.15);
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  min-height: 100%;
+  background: var(--bg-gradient);
+  color: var(--fg);
+  transition: background 0.4s ease, color 0.2s ease;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+a {
+  color: inherit;
+}
+
+textarea {
+  font-family: 'JetBrains Mono', 'Fira Code', SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace;
+}
+
+/* 全てのフォーカスを完全に非表示 */
+:focus,
+:focus-visible,
+*:focus,
+*:focus-visible {
+  outline: 0 !important;
+  box-shadow: none !important;
+}
+
+/* textareaとinput[type="text"]のみフォーカス表示を許可 */
+textarea:focus-visible,
+input[type="text"]:focus-visible {
+  outline: 1px solid var(--accent) !important;
+  box-shadow: inset 0 0 0 1px var(--accent) !important;
+}
+
+/* ボタンやUIパーツはテキスト選択不可 */
+button,
+span,
+div,
+label,
+nav,
+aside {
+  user-select: none;
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+}
+
+/* テキスト編集可能な要素のみ選択可能 */
+textarea,
+input[type="text"] {
+  user-select: text !important;
+  -webkit-user-select: text !important;
+  -moz-user-select: text !important;
+  -ms-user-select: text !important;
+}

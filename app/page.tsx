@@ -1,0 +1,4045 @@
+"use client";
+
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  GoogleAuthProvider,
+  User,
+  onAuthStateChanged,
+  signInWithPopup,
+  signOut
+} from "firebase/auth";
+import { collection, deleteDoc, doc, getDoc, getDocs, query, setDoc, where } from "firebase/firestore";
+import { auth, db } from "../src/lib/firebase";
+import type { MouseEvent as ReactMouseEvent, WheelEvent as ReactWheelEvent, ReactNode } from "react";
+import { FcAlphabeticalSortingAz, FcFaq, FcFile, FcLock, FcMindMap, FcSettings } from "react-icons/fc";
+import { GoSidebarCollapse, GoSidebarExpand } from "react-icons/go";
+import { RxDoubleArrowDown, RxDoubleArrowUp } from "react-icons/rx";
+import { savePreviewPayload } from "../lib/previewStorage";
+
+type Theme = "dark" | "light";
+const THEME_STORAGE_KEY = "whiteboard-theme";
+
+type BoardType = "proposal" | "mindmap" | "ranking" | "qa";
+
+type Board = {
+  id: BoardType;
+  name: string;
+  icon: ReactNode;
+  accent: string;
+};
+
+type MarkdownPage = {
+  id: string;
+  boardId: "proposal";
+  title: string;
+  projectId: string;
+  content: string;
+};
+
+type MindmapSection = {
+  id: string;
+  text: string;
+  fontSize?: number;
+};
+
+type MindmapNode = {
+  id: string;
+  title: string;
+  color: string;
+  value: number;
+  x: number;
+  y: number;
+  sections: MindmapSection[];
+};
+
+type MindmapTextBox = {
+  id: string;
+  text: string;
+  color: string;
+  value: number;
+  x: number;
+  y: number;
+  fontSize?: number;
+};
+
+type MindmapConnector = {
+  nodeId?: string;
+  sectionId?: string;
+  textBoxId?: string;
+  side?: "left" | "right";
+};
+
+type MindmapLink = {
+  id: string;
+  from: MindmapConnector;
+  to: MindmapConnector;
+};
+
+type MindmapPage = {
+  id: string;
+  boardId: "mindmap";
+  title: string;
+  projectId: string;
+  nodes: MindmapNode[];
+  textBoxes?: MindmapTextBox[];
+  links: MindmapLink[];
+};
+
+type RankingItem = {
+  id: string;
+  title: string;
+  body: string;
+};
+
+type RankingPage = {
+  id: string;
+  boardId: "ranking";
+  title: string;
+  projectId: string;
+  items: RankingItem[];
+  note?: string;
+};
+
+type QAAnswer = {
+  id: string;
+  text: string;
+  createdAt: string;
+};
+
+type QACard = {
+  id: string;
+  title: string;
+  description: string;
+  answers: QAAnswer[];
+  createdAt: string;
+};
+
+type QAPage = {
+  id: string;
+  boardId: "qa";
+  title: string;
+  projectId: string;
+  cards: QACard[];
+};
+
+type Page = MarkdownPage | MindmapPage | RankingPage | QAPage;
+
+type Project = {
+  id: string;
+  name: string;
+};
+
+type LocalAccount = {
+  name: string;
+  key: string;
+};
+
+const boards: Board[] = [
+  { id: "proposal", name: "企画書", icon: <FcFile size={18} />, accent: "#3b82f6" },
+  { id: "mindmap", name: "ダイアグラム", icon: <FcMindMap size={18} />, accent: "#ec4899" },
+  { id: "ranking", name: "ランキング", icon: <FcAlphabeticalSortingAz size={18} />, accent: "#eab308" },
+  { id: "qa", name: "Q&A", icon: <FcFaq size={18} />, accent: "#0ea5e9" }
+];
+
+const initialProjects: Project[] = [
+  { id: "default-project", name: "プロジェクトA" }
+];
+
+const DEFAULT_PROJECT_ID = initialProjects[0]?.id ?? "default-project";
+
+const TIMESTAMP_TOKEN = "__LAST_UPDATED__";
+const PROJECT_TOKEN = "__PROJECT_TITLE__";
+
+const markdownTemplate = `---
+owner: your-name
+persona: product manager
+kpi: session-length, retention
+last-updated: ${TIMESTAMP_TOKEN}
+---
+
+# Project: ${PROJECT_TOKEN}
+
+## Why now?
+- Need a lightweight way to co-create企画書 in Markdown.
+- Cloud Run + Firestore keep infra within the free tier when idle.
+
+## Requirements
+1. Multi-user editing with optimistic UI.
+2. Reusable proposal templates.
+3. Export-friendly .md for GitHub Copilot prompts.
+
+## Cost Guardrails
+- Stay inside Cloud Run free tier (0 min instances).
+- Prefer Firestore reads batching + memoized caches.
+- Snapshot archives go to Cloud Storage or GitHub.
+
+## Next steps
+- [ ] Flesh out Firestore security rules.
+- [ ] Build editor presence indicators.
+- [ ] Automate Cloud Run deploy pipeline.
+`;
+
+const MINDMAP_WIDTH = 1800;
+const MINDMAP_HEIGHT = 1200;
+const MIN_ZOOM = 0.2;
+const MAX_ZOOM = 1.6;
+const ZOOM_STEP = 0.1;
+const DEFAULT_NODE_TITLE = "パネル";
+const DEFAULT_NODE_COLOR = "#8B0000";
+const NODE_COLOR_PRESETS = [
+  "#8B0000",
+  "#00008B",
+  "#8B8B00",
+  "#006400",
+  "#660000", "#8B0000", "#AA0000", "#CC1111",
+  "#003366", "#004499", "#0066BB", "#0088DD",
+  "#666600", "#888800", "#AAAA00", "#CCCC11",
+  "#006633", "#008844", "#00AA55", "#00CC66",
+  "#663333", "#884444", "#AA5555", "#CC6666",
+  "#330066", "#550088", "#7700AA", "#9900CC",
+  "#663366", "#885588", "#AA66AA", "#CC77CC",
+  "#006666", "#008888", "#00AAAA", "#00CCCC"
+];
+const NODE_WIDTH = 200;
+const NODE_HEADER_HEIGHT = 42;
+const NODE_SECTION_HEIGHT = 64;
+const NODE_SECTION_GAP = 10;
+
+const getSectionAnchorPosition = (node: MindmapNode, section: MindmapSection, side: "left" | "right" = "right") => {
+  const sectionIndex = node.sections.findIndex((s) => s.id === section.id);
+  let cumulativeHeight = 0;
+  for (let i = 0; i < sectionIndex; i++) {
+    const lines = Math.max(1, ((node.sections[i].text ?? "").match(/\n/g) || []).length + 1);
+    const fontSize = node.sections[i].fontSize ?? 12;
+    const lineHeight = 1.2;
+    const padding = 5.6;
+    const height = Math.max(64, lines * fontSize * lineHeight + padding);
+    cumulativeHeight += height;
+  }
+  const lines = Math.max(1, ((section.text ?? "").match(/\n/g) || []).length + 1);
+  const fontSize = section.fontSize ?? 12;
+  const lineHeight = 1.2;
+  const padding = 5.6;
+  const sectionHeight = Math.max(64, lines * fontSize * lineHeight + padding);
+  const headerHeight = 28;
+  const sectionTop = headerHeight + cumulativeHeight;
+  const sectionCenterY = sectionTop + sectionHeight / 2 + 8;
+  return {
+    x: side === "left" ? node.x : node.x + 200,
+    y: node.y + sectionCenterY
+  };
+};
+
+const getTextBoxAnchorPosition = (textBox: MindmapTextBox, side: "left" | "right" = "right") => {
+  return {
+    x: textBox.x,
+    y: textBox.y + 20
+  };
+};
+
+const createId = (prefix: string) =>
+  typeof crypto !== "undefined" && crypto.randomUUID
+    ? crypto.randomUUID()
+    : `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+const createSection = (text: string): MindmapSection => ({
+  id: createId("section"),
+  text
+});
+
+const createRankingItem = (title: string, body: string = ""): RankingItem => ({
+  id: createId("ranking"),
+  title,
+  body
+});
+
+const createMarkdownPage = (title: string, projectId: string): MarkdownPage => ({
+  id: createId("proposal"),
+  boardId: "proposal",
+  title,
+  projectId,
+  content: markdownTemplate
+    .replace(PROJECT_TOKEN, title)
+    .replace(TIMESTAMP_TOKEN, new Date().toISOString())
+});
+
+const createMindmapPage = (title: string, projectId: string): MindmapPage => {
+  const centerId = createId("node");
+  const branchA = createId("node");
+  const centerSections = [createSection("テーマ"), createSection("背景")];
+  const branchASections = [createSection("課題")];
+  return {
+    id: createId("mindmap"),
+    boardId: "mindmap",
+    title,
+    projectId,
+    nodes: [
+      {
+        id: centerId,
+        title: "パネル",
+        color: DEFAULT_NODE_COLOR,
+        value: 10,
+        x: 320,
+        y: 160,
+        sections: centerSections
+      },
+      {
+        id: branchA,
+        title: "課題",
+        color: DEFAULT_NODE_COLOR,
+        value: 10,
+        x: 120,
+        y: 80,
+        sections: branchASections
+        }
+    ],
+    textBoxes: [],
+      links: []
+  };
+};
+
+const createRankingPage = (title: string, projectId: string): RankingPage => ({
+  id: createId("ranking-page"),
+  boardId: "ranking",
+  title,
+  projectId,
+  items: [
+    createRankingItem("最優先", ""),
+    createRankingItem("Priority 2", "ペンディング項目を洗い出す"),
+    createRankingItem("Priority 3", "最重要タスクを先頭に並べ替える")
+  ]
+});
+
+const createQAAnswer = (text: string): QAAnswer => ({
+  id: createId("qa-answer"),
+  text,
+  createdAt: new Date().toISOString()
+});
+
+const createQACard = (title: string, description: string = "", answers: QAAnswer[] = []): QACard => ({
+  id: createId("qa-card"),
+  title,
+  description,
+  answers,
+  createdAt: new Date().toISOString()
+});
+
+const createQAPage = (title: string, projectId: string): QAPage => ({
+  id: createId("qa-page"),
+  boardId: "qa",
+  title,
+  projectId,
+  cards: [
+    createQACard(
+      "今のプロジェクトの不明点をどう整理すればいい？",
+      "チームからの質問や悩みを蓄積しておきたい。回答候補を自由に書けるようにしたい。",
+      [
+        createQAAnswer("質問の背景と期待する答えのイメージをそろえる"),
+        createQAAnswer("初期の回答をテンプレート化し、同僚に共有する")
+      ]
+    )
+  ],
+});
+
+const createDefaultPagesForProject = (projectId: string): Page[] => [
+  createMarkdownPage("Markdown Canvas", projectId),
+  createMindmapPage("構造化マップ", projectId),
+  createRankingPage("やることメモ", projectId),
+  createQAPage("Q&A掲示板", projectId)
+];
+
+const INITIAL_PAGES_FOR_DEFAULT_PROJECT = createDefaultPagesForProject(DEFAULT_PROJECT_ID);
+
+const isMarkdownPage = (page: Page | null): page is MarkdownPage => !!page && page.boardId === "proposal";
+const isMindmapPage = (page: Page | null): page is MindmapPage => !!page && page.boardId === "mindmap";
+const isRankingPage = (page: Page | null): page is RankingPage => !!page && page.boardId === "ranking";
+const isQAPage = (page: Page | null): page is QAPage => !!page && page.boardId === "qa";
+
+export default function HomePage() {
+  const [theme, setTheme] = useState<Theme>("light");
+  const [projects, setProjects] = useState<Project[]>(initialProjects);
+  const [pages, setPages] = useState<Page[]>(INITIAL_PAGES_FOR_DEFAULT_PROJECT);
+  const [selectedBoardId, setSelectedBoardId] = useState<BoardType>("proposal");
+  const [activeProjectId, setActiveProjectId] = useState<string>(DEFAULT_PROJECT_ID);
+  const [newProjectName, setNewProjectName] = useState("");
+  const [projectRenameDraft, setProjectRenameDraft] = useState("");
+  const [isProjectMenuOpen, setIsProjectMenuOpen] = useState(false);
+  const [activePageId, setActivePageId] = useState<string>(INITIAL_PAGES_FOR_DEFAULT_PROJECT[0]?.id ?? "");
+  const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
+  const [localAccount, setLocalAccount] = useState<LocalAccount | null>(null);
+  const [activeAccountId, setActiveAccountId] = useState<string | null>(null);
+  const [accountMessage, setAccountMessage] = useState("");
+  const [isAccountModalOpen, setIsAccountModalOpen] = useState(false);
+  const [accountNameInput, setAccountNameInput] = useState("");
+  const [accountKeyInput, setAccountKeyInput] = useState("");
+  const activeProject = useMemo(
+    () => projects.find((project) => project.id === activeProjectId) ?? null,
+    [projects, activeProjectId]
+  );
+  const activeAccountLabel = useMemo(() => {
+    if (firebaseUser?.displayName) return firebaseUser.displayName;
+    if (firebaseUser?.email) return firebaseUser.email;
+    if (localAccount?.name) return localAccount.name;
+    return null;
+  }, [firebaseUser?.displayName, firebaseUser?.email, localAccount?.name]);
+  const isLoggedIn = !!firebaseUser || !!localAccount;
+  const [linkingFrom, setLinkingFrom] = useState<MindmapConnector | null>(null);
+  const [linkingCursor, setLinkingCursor] = useState<{ x: number; y: number } | null>(null);
+  const [mindmapScale, setMindmapScale] = useState(1);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [selectedTextBoxId, setSelectedTextBoxId] = useState<string | null>(null);
+  const [editingTextBoxId, setEditingTextBoxId] = useState<string | null>(null);
+  const [contextMenu, setContextMenu] = useState<{
+    x: number;
+    y: number;
+    type: "node" | "section" | "textbox";
+    nodeId?: string;
+    sectionId?: string;
+    textBoxId?: string;
+  } | null>(null);
+  const [dragging, setDragging] = useState<{
+    pageId: string;
+    nodeId?: string;
+    textBoxId?: string;
+    offsetX: number;
+    offsetY: number;
+  } | null>(null);
+  const [isBoardsOpen, setIsBoardsOpen] = useState(true);
+  const [isToolsOpen, setIsToolsOpen] = useState(true);
+  const [draggingRankingItemId, setDraggingRankingItemId] = useState<string | null>(null);
+  const [dragOverRankingItemId, setDragOverRankingItemId] = useState<string | null>(null);
+  const [selectedSectionId, setSelectedSectionId] = useState<string | null>(null);
+  const [mindmapPan, setMindmapPan] = useState({ x: 0, y: 0 });
+  const [isPanning, setIsPanning] = useState(false);
+  const [selectedQACardId, setSelectedQACardId] = useState<string | null>(null);
+  const [qaAnswerDraft, setQaAnswerDraft] = useState("");
+  const [firebaseStatus, setFirebaseStatus] = useState("");
+  const [isCheckingFirebase, setIsCheckingFirebase] = useState(false);
+  const [isAuthSigningIn, setIsAuthSigningIn] = useState(false);
+  const [isDataSyncing, setIsDataSyncing] = useState(false);
+  const [dataMessage, setDataMessage] = useState("");
+
+  const mindmapCanvasRef = useRef<HTMLDivElement | null>(null);
+  const mindmapContainerRef = useRef<HTMLDivElement | null>(null);
+  const editingTextBoxRefRef = useRef<HTMLTextAreaElement | null>(null);
+  const panStartRef = useRef({ x: 0, y: 0 });
+  const projectMenuRef = useRef<HTMLDivElement | null>(null);
+  const projectsPersistTimerRef = useRef<number | null>(null);
+  const pagesPersistTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
+    if (stored === "light" || stored === "dark") {
+      setTheme(stored);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!accountMessage) return;
+    const timer = window.setTimeout(() => setAccountMessage(""), 2600);
+    return () => window.clearTimeout(timer);
+  }, [accountMessage]);
+
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      setFirebaseUser(user);
+      setActiveAccountId(user?.uid ?? null);
+      setAccountMessage("");
+      setIsAuthSigningIn(false);
+    });
+    return unsubscribe;
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const raw = window.localStorage.getItem("whiteboard-local-account");
+    if (!raw) return;
+    try {
+      const parsed = JSON.parse(raw) as Partial<LocalAccount>;
+      if (parsed?.name && parsed?.key) {
+        setLocalAccount({ name: parsed.name, key: parsed.key });
+        setActiveAccountId(parsed.name);
+      }
+    } catch (error) {
+      console.error("failed to restore local account", error);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (localAccount) {
+      window.localStorage.setItem("whiteboard-local-account", JSON.stringify(localAccount));
+    } else {
+      window.localStorage.removeItem("whiteboard-local-account");
+    }
+  }, [localAccount]);
+
+  useEffect(() => {
+    const loadFromFirestore = async () => {
+      if (!firebaseUser) {
+        setProjects(initialProjects);
+        setPages(INITIAL_PAGES_FOR_DEFAULT_PROJECT);
+        setActiveProjectId(DEFAULT_PROJECT_ID);
+        setActivePageId(INITIAL_PAGES_FOR_DEFAULT_PROJECT[0]?.id ?? "");
+        setDataMessage("未ログイン: ローカル初期データを表示中");
+        return;
+      }
+      setIsDataSyncing(true);
+      setDataMessage("Firestoreから読み込み中...");
+      try {
+        const projectsSnap = await getDocs(collection(db, "projects"));
+        const loadedProjects: Project[] = projectsSnap.docs.map((docSnap) => {
+          const data = docSnap.data();
+          return {
+            id: docSnap.id,
+            name: typeof data.name === "string" ? data.name : "無題プロジェクト"
+          } as Project;
+        });
+
+        const nextProjects = loadedProjects.length > 0 ? loadedProjects : initialProjects;
+        if (loadedProjects.length === 0) {
+          // 初回: デフォルトプロジェクトを保存（メンバーやUIDは持たせない）
+          await Promise.all(
+            nextProjects.map((project) => setDoc(doc(db, "projects", project.id), project))
+          );
+        }
+
+        setProjects(nextProjects);
+        const nextActiveProjectId = nextProjects[0]?.id ?? DEFAULT_PROJECT_ID;
+        setActiveProjectId(nextActiveProjectId);
+
+        const pagesSnap = await getDocs(collection(db, "pages"));
+        let loadedPages: Page[] = pagesSnap.docs
+          .map((docSnap) => {
+            const data = docSnap.data() as Page;
+            return { ...data, id: docSnap.id } as Page;
+          })
+          .filter((page) => page && typeof (page as any).id === "string");
+
+        if (loadedPages.length === 0) {
+          const defaults = createDefaultPagesForProject(nextActiveProjectId);
+          loadedPages = defaults;
+          await Promise.all(
+            defaults.map((page) => setDoc(doc(db, "pages", page.id), page))
+          );
+        }
+
+        setPages(loadedPages);
+        const nextActivePageId = loadedPages.find((p) => p.projectId === nextActiveProjectId)?.id ?? loadedPages[0]?.id ?? "";
+        setActivePageId(nextActivePageId);
+        setDataMessage("Firestore同期済み");
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setDataMessage(`Firestore読み込み失敗: ${message}`);
+      } finally {
+        setIsDataSyncing(false);
+      }
+    };
+
+    void loadFromFirestore();
+  }, [firebaseUser]);
+
+  useEffect(() => {
+    if (!activeProject) {
+      setProjectRenameDraft("");
+      return;
+    }
+    setProjectRenameDraft(activeProject.name);
+  }, [activeProject?.name, activeProjectId]);
+
+  useEffect(() => {
+    if (!firebaseUser) return;
+    if (projectsPersistTimerRef.current) {
+      window.clearTimeout(projectsPersistTimerRef.current);
+    }
+    projectsPersistTimerRef.current = window.setTimeout(async () => {
+      try {
+        await Promise.all(projects.map((project) => setDoc(doc(db, "projects", project.id), project)));
+        setDataMessage("");
+      } catch (error) {
+        console.error("プロジェクト同期失敗", error);
+      }
+    }, 800);
+    return () => {
+      if (projectsPersistTimerRef.current) {
+        window.clearTimeout(projectsPersistTimerRef.current);
+      }
+    };
+  }, [projects, firebaseUser]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !isProjectMenuOpen) return;
+    const handleClickOutside = (event: MouseEvent) => {
+      if (projectMenuRef.current && !projectMenuRef.current.contains(event.target as Node)) {
+        setIsProjectMenuOpen(false);
+      }
+    };
+    window.addEventListener("mousedown", handleClickOutside);
+    return () => window.removeEventListener("mousedown", handleClickOutside);
+  }, [isProjectMenuOpen]);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    document.documentElement.dataset.theme = theme;
+    document.documentElement.style.setProperty("color-scheme", theme);
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+    }
+  }, [theme]);
+
+  useEffect(() => {
+    if (!firebaseUser) return;
+    if (pagesPersistTimerRef.current) {
+      window.clearTimeout(pagesPersistTimerRef.current);
+    }
+    pagesPersistTimerRef.current = window.setTimeout(async () => {
+      try {
+        await Promise.all(pages.map((page) => setDoc(doc(db, "pages", page.id), page)));
+        setDataMessage("ページを同期しました");
+      } catch (error) {
+        // サイレントに失敗をログへ出すだけに留める
+        console.error("ページ同期失敗", error);
+      }
+    }, 800);
+    return () => {
+      if (pagesPersistTimerRef.current) {
+        window.clearTimeout(pagesPersistTimerRef.current);
+      }
+    };
+  }, [pages, firebaseUser]);
+
+  useEffect(() => {
+    if (!isPanning) return;
+    const handleMouseMove = (event: MouseEvent) => {
+      const newX = event.clientX - panStartRef.current.x;
+      const newY = event.clientY - panStartRef.current.y;
+      setMindmapPan({ x: newX, y: newY });
+    };
+    const handleMouseUp = () => {
+      setIsPanning(false);
+    };
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("mouseup", handleMouseUp);
+    return () => {
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("mouseup", handleMouseUp);
+    };
+  }, [isPanning]);
+
+  // 既存データを新構造にアップグレード（sections/connector sideなど）
+  useEffect(() => {
+    setPages((prev) =>
+      prev.map((page) => {
+        if (!isMindmapPage(page)) return page;
+        let nodesMutated = false;
+        let nodes = page.nodes.map((node) => {
+          if (node.sections && node.sections.length > 0) {
+            return node;
+          }
+          nodesMutated = true;
+          const legacy = (node as MindmapNode & { text?: string }).text ?? "";
+          return {
+            ...node,
+            sections: [createSection(legacy || "新しいアイテム")]
+          };
+        });
+        const nodeMap = new Map(nodes.map((node) => [node.id, node]));
+        const ensureSection = (nodeId: string) => {
+          const target = nodeMap.get(nodeId);
+          if (!target) return { node: undefined, sectionId: "" };
+          if (target.sections.length > 0) {
+            return { node: target, sectionId: target.sections[0].id };
+          }
+          const fallback = createSection("新しいアイテム");
+          nodesMutated = true;
+          const updatedNode: MindmapNode = { ...target, sections: [fallback] };
+          nodeMap.set(updatedNode.id, updatedNode);
+          nodes = nodes.map((node) => (node.id === updatedNode.id ? updatedNode : node));
+          return { node: updatedNode, sectionId: fallback.id };
+        };
+        let linksMutated = false;
+        const links = page.links
+          .map((link) => {
+            const rawLink = link as MindmapLink & {
+              from: MindmapConnector | (MindmapConnector & { side?: "left" | "right" }) | string;
+              to: MindmapConnector | (MindmapConnector & { side?: "left" | "right" }) | string;
+            };
+            const needsUpgrade =
+              typeof rawLink.from === "string" ||
+              typeof rawLink.to === "string" ||
+              (typeof rawLink.from === "object" && !("side" in rawLink.from)) ||
+              (typeof rawLink.to === "object" && !("side" in rawLink.to));
+            if (!needsUpgrade) {
+              return rawLink;
+            }
+            linksMutated = true;
+            const fromNodeId = typeof rawLink.from === "string" ? rawLink.from : rawLink.from.nodeId;
+            const toNodeId = typeof rawLink.to === "string" ? rawLink.to : rawLink.to.nodeId;
+            if (!fromNodeId || !toNodeId) {
+              return null;
+            }
+            const { sectionId: fromSectionId } = ensureSection(fromNodeId);
+            const { sectionId: toSectionId } = ensureSection(toNodeId);
+            if (!fromSectionId || !toSectionId) {
+              return null;
+            }
+            const fallbackFromSide =
+              typeof rawLink.from === "object" && "side" in rawLink.from ? rawLink.from.side : "right";
+            const fallbackToSide =
+              typeof rawLink.to === "object" && "side" in rawLink.to ? rawLink.to.side : "left";
+            return {
+              ...rawLink,
+              from:
+                typeof rawLink.from === "string"
+                  ? { nodeId: fromNodeId, sectionId: fromSectionId, side: "right" }
+                  : { ...rawLink.from, side: fallbackFromSide ?? "right" },
+              to:
+                typeof rawLink.to === "string"
+                  ? { nodeId: toNodeId, sectionId: toSectionId, side: "left" }
+                  : { ...rawLink.to, side: fallbackToSide ?? "left" }
+            } as MindmapLink;
+          })
+          .filter((link): link is MindmapLink => link !== null);
+        if (!nodesMutated && !linksMutated) return page;
+        return { ...page, nodes, links };
+      })
+    );
+  }, []);
+
+  useEffect(() => {
+    const next = pages.find((page) => page.id === activePageId && page.projectId === activeProjectId);
+    if (next && next.boardId === selectedBoardId) {
+      return;
+    }
+    const fallback = pages.find(
+      (page) => page.boardId === selectedBoardId && page.projectId === activeProjectId
+    );
+    setActivePageId(fallback?.id ?? "");
+  }, [activeProjectId, selectedBoardId, pages, activePageId]);
+
+  const pagesForBoard = useMemo(
+    () =>
+      pages.filter((page) => page.boardId === selectedBoardId && page.projectId === activeProjectId),
+    [pages, selectedBoardId, activeProjectId]
+  );
+
+  const activePage =
+    pages.find((page) => page.id === activePageId && page.projectId === activeProjectId) ??
+    pagesForBoard[0] ??
+    null;
+
+  useEffect(() => {
+    if (!isMindmapPage(activePage)) {
+      setSelectedNodeId(null);
+      return;
+    }
+    const hasSelection = activePage.nodes.find((node) => node.id === selectedNodeId);
+    if (!hasSelection) {
+      setSelectedNodeId(activePage.nodes[0]?.id ?? null);
+    }
+  }, [activePage, selectedNodeId]);
+
+  useEffect(() => {
+    if (!isMindmapPage(activePage)) {
+      setLinkingFrom(null);
+      setLinkingCursor(null);
+    }
+  }, [activePage]);
+
+  useEffect(() => {
+    if (!isQAPage(activePage)) {
+      setSelectedQACardId(null);
+      return;
+    }
+    const exists = activePage.cards.some((card) => card.id === selectedQACardId);
+    if (!exists) {
+      setSelectedQACardId(activePage.cards[0]?.id ?? null);
+    }
+  }, [activePage, selectedQACardId]);
+
+  useEffect(() => {
+    setQaAnswerDraft("");
+  }, [selectedQACardId]);
+
+  useEffect(() => {
+    return () => {
+      if (projectsPersistTimerRef.current) {
+        window.clearTimeout(projectsPersistTimerRef.current);
+      }
+      if (pagesPersistTimerRef.current) {
+        window.clearTimeout(pagesPersistTimerRef.current);
+      }
+    };
+  }, []);
+
+  const boardCounts = useMemo(() => {
+    return boards.reduce<Record<BoardType, number>>(
+      (acc, board) => {
+        acc[board.id] = pages.filter(
+          (page) => page.boardId === board.id && page.projectId === activeProjectId
+        ).length;
+        return acc;
+      },
+      { proposal: 0, mindmap: 0, ranking: 0, qa: 0 }
+    );
+  }, [pages, activeProjectId]);
+
+  // 選択状態を同期：パネルまたはメモのいずれか一方のみを選択
+  useEffect(() => {
+    if (selectedNodeId && selectedTextBoxId) {
+      setSelectedTextBoxId(null);
+    }
+  }, [selectedNodeId, selectedTextBoxId]);
+
+  // メモのtextarea高さ自動調整
+  useEffect(() => {
+    if (editingTextBoxRefRef.current) {
+      editingTextBoxRefRef.current.style.height = "auto";
+      editingTextBoxRefRef.current.style.height = Math.max(
+        32,
+        Math.min(300, editingTextBoxRefRef.current.scrollHeight)
+      ) + "px";
+    }
+  }, [editingTextBoxId]);
+
+  const toggleTheme = useCallback(() => {
+    setTheme((prev) => (prev === "dark" ? "light" : "dark"));
+  }, []);
+
+  const handleFirebaseAuthLogin = useCallback(async () => {
+    setIsAuthSigningIn(true);
+    try {
+      const provider = new GoogleAuthProvider();
+      await signInWithPopup(auth, provider);
+      setFirebaseStatus("auth ok: signed in (Google)");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setFirebaseStatus(`auth error: ${message}`);
+    } finally {
+      setIsAuthSigningIn(false);
+    }
+  }, []);
+
+  const handleFirebaseCheck = useCallback(async () => {
+    setIsCheckingFirebase(true);
+    try {
+      const projectId = auth.app?.options?.projectId ?? "(unknown)";
+      let summary = `auth ok (projectId=${projectId})`;
+      try {
+        const snap = await getDoc(doc(db, "__health", "ping"));
+        summary += snap.exists() ? " / firestore ok (doc found)" : " / firestore ok (doc missing)";
+      } catch (firestoreError) {
+        const message = firestoreError instanceof Error ? firestoreError.message : String(firestoreError);
+        summary += ` / firestore error: ${message}`;
+      }
+      setFirebaseStatus(summary);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setFirebaseStatus(`error: ${message}`);
+    } finally {
+      setIsCheckingFirebase(false);
+    }
+  }, []);
+
+  const handleAccountDialogClose = useCallback(() => {
+    setIsAccountModalOpen(false);
+    setAccountMessage("");
+    setAccountNameInput("");
+    setAccountKeyInput("");
+  }, []);
+
+  const handleLocalAccountLogin = useCallback(() => {
+    if (isAuthSigningIn) return;
+    const name = accountNameInput.trim();
+    const key = accountKeyInput.trim();
+    if (!name) {
+      setAccountMessage("アカウント名を入力してください");
+      return;
+    }
+    setIsAuthSigningIn(true);
+    const nextAccount: LocalAccount = { name, key };
+    setLocalAccount(nextAccount);
+    setActiveAccountId(name);
+    setAccountMessage("ローカルアカウントでログインしました");
+    setIsAccountModalOpen(false);
+    setIsAuthSigningIn(false);
+  }, [accountNameInput, accountKeyInput, isAuthSigningIn]);
+
+  const handleAccountLogout = useCallback(() => {
+    if (firebaseUser) {
+      signOut(auth)
+        .then(() => setAccountMessage("ログアウトしました"))
+        .catch((error) => {
+          const message = error instanceof Error ? error.message : String(error);
+          setAccountMessage(`ログアウトに失敗しました: ${message}`);
+        })
+        .finally(() => setIsAccountModalOpen(false));
+      return;
+    }
+    setLocalAccount(null);
+    setActiveAccountId(null);
+    setAccountMessage("ログアウトしました");
+    setIsAccountModalOpen(false);
+  }, [firebaseUser]);
+
+  const handleGoogleLogin = useCallback(async () => {
+    if (isAuthSigningIn) return;
+    setIsAuthSigningIn(true);
+    const provider = new GoogleAuthProvider();
+    try {
+      await signInWithPopup(auth, provider);
+      setAccountMessage("Googleでログインしました");
+      setIsAccountModalOpen(false);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setAccountMessage(`Googleログインに失敗しました: ${message}`);
+    } finally {
+      setIsAuthSigningIn(false);
+    }
+  }, [isAuthSigningIn]);
+
+  const adjustMindmapScale = useCallback((delta: number) => {
+    setMindmapScale((prev) => {
+      const next = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, prev + delta));
+      return Number(next.toFixed(2));
+    });
+  }, []);
+
+  const handleZoomIn = useCallback(() => adjustMindmapScale(ZOOM_STEP), [adjustMindmapScale]);
+  const handleZoomOut = useCallback(() => adjustMindmapScale(-ZOOM_STEP), [adjustMindmapScale]);
+  const handleZoomReset = useCallback(() => setMindmapScale(1), []);
+  const handleFocusNode = useCallback(() => {
+    if (!selectedNodeId || !isMindmapPage(activePage)) return;
+    const node = activePage.nodes.find((n) => n.id === selectedNodeId);
+    if (!node) return;
+    const containerRect = mindmapContainerRef.current?.getBoundingClientRect();
+    if (!containerRect) return;
+    const containerWidth = containerRect.width;
+    const containerHeight = containerRect.height;
+    const nodeCenterX = node.x + NODE_WIDTH / 2;
+    const nodeCenterY = node.y + 50;
+    const zoomLevel = 0.8;
+    setMindmapScale(zoomLevel);
+    const offsetX = containerWidth / 2 - nodeCenterX * zoomLevel;
+    const offsetY = containerHeight / 2 - nodeCenterY * zoomLevel;
+    setMindmapPan({ x: offsetX, y: offsetY });
+  }, [selectedNodeId, activePage]);
+
+  const handleFitAllNodes = useCallback(() => {
+    if (!isMindmapPage(activePage) || activePage.nodes.length === 0) return;
+    const containerRect = mindmapContainerRef.current?.getBoundingClientRect();
+    if (!containerRect) return;
+    const containerWidth = containerRect.width;
+    const containerHeight = containerRect.height;
+    let minX = Infinity,
+      minY = Infinity,
+      maxX = -Infinity,
+      maxY = -Infinity;
+    activePage.nodes.forEach((node) => {
+      minX = Math.min(minX, node.x);
+      minY = Math.min(minY, node.y);
+      maxX = Math.max(maxX, node.x + NODE_WIDTH);
+      maxY = Math.max(maxY, node.y + 100);
+    });
+    const contentWidth = maxX - minX;
+    const contentHeight = maxY - minY;
+    const padding = 1.2;
+    const scaleX = containerWidth / (contentWidth * padding);
+    const scaleY = containerHeight / (contentHeight * padding);
+    const newZoom = Math.min(scaleX, scaleY, MAX_ZOOM);
+    setMindmapScale(newZoom);
+    const contentCenterX = (minX + maxX) / 2;
+    const contentCenterY = (minY + maxY) / 2;
+    const offsetX = containerWidth / 2 - contentCenterX * newZoom;
+    const offsetY = containerHeight / 2 - contentCenterY * newZoom;
+    setMindmapPan({ x: offsetX, y: offsetY });
+  }, [activePage]);
+
+  const handleMindmapWheel = useCallback(
+    (event: ReactWheelEvent<HTMLDivElement>) => {
+      event.preventDefault();
+      adjustMindmapScale(event.deltaY > 0 ? -ZOOM_STEP : ZOOM_STEP);
+    },
+    [adjustMindmapScale]
+  );
+
+  const handleMindmapMouseDown = useCallback(
+    (event: React.MouseEvent) => {
+      if (event.button !== 1) return;
+      event.preventDefault();
+      setIsPanning(true);
+      setSelectedSectionId(null);
+      panStartRef.current = { x: event.clientX - mindmapPan.x, y: event.clientY - mindmapPan.y };
+    },
+    [mindmapPan]
+  );
+
+  const handleProjectSelect = useCallback((projectId: string) => {
+    setActiveProjectId(projectId);
+    setIsProjectMenuOpen(false);
+  }, []);
+
+  const handleAddProject = useCallback(() => {
+    const trimmedName = newProjectName.trim();
+    if (!trimmedName) return;
+    const newProject: Project = { id: createId("project"), name: trimmedName };
+    setProjects((prev) => [...prev, newProject]);
+    setPages((prev) => [...prev, ...createDefaultPagesForProject(newProject.id)]);
+    setActiveProjectId(newProject.id);
+    setNewProjectName("");
+  }, [newProjectName]);
+
+  const handleRenameProject = useCallback(() => {
+    if (!activeProject) return;
+    const trimmedName = projectRenameDraft.trim();
+    if (!trimmedName || trimmedName === activeProject.name) return;
+    setProjects((prev) =>
+      prev.map((project) =>
+        project.id === activeProjectId ? { ...project, name: trimmedName } : project
+      )
+    );
+  }, [activeProject, activeProjectId, projectRenameDraft]);
+
+  const handleBoardSelect = useCallback((boardId: BoardType) => {
+    setSelectedBoardId(boardId);
+  }, []);
+
+  const handlePageSelect = useCallback((pageId: string) => {
+    setActivePageId(pageId);
+  }, []);
+
+  const handleAddPage = useCallback(() => {
+    const page =
+      selectedBoardId === "proposal"
+        ? createMarkdownPage("New Proposal", activeProjectId)
+        : selectedBoardId === "qa"
+        ? createQAPage("New Q&A", activeProjectId)
+        : selectedBoardId === "mindmap"
+        ? createMindmapPage("New Mindmap", activeProjectId)
+        : createRankingPage("New Ranking", activeProjectId);
+    setPages((prev) => [...prev, page]);
+    setActivePageId(page.id);
+  }, [selectedBoardId, activeProjectId]);
+
+
+  const handleAddQACard = useCallback(() => {
+    const newCard = createQACard("新しい質問", "質問や悩みをここに記入して、回答を募集できます。");
+    setPages((prev) =>
+      prev.map((page) =>
+        isQAPage(page) && page.id === activePageId
+          ? { ...page, cards: [...page.cards, newCard] }
+          : page
+      )
+    );
+    setSelectedQACardId(newCard.id);
+  }, [activePageId]);
+
+  const handleQACardFieldChange = useCallback(
+    (cardId: string, field: "title" | "description", value: string) => {
+      setPages((prev) =>
+        prev.map((page) =>
+          isQAPage(page) && page.id === activePageId
+            ? {
+                ...page,
+                cards: page.cards.map((card) =>
+                  card.id === cardId ? { ...card, [field]: value } : card
+                )
+              }
+            : page
+        )
+      );
+    },
+    [activePageId]
+  );
+
+  const handleAddQAAnswer = useCallback(() => {
+    if (!qaAnswerDraft.trim() || !selectedQACardId) return;
+    const nextAnswer = createQAAnswer(qaAnswerDraft.trim());
+    setPages((prev) =>
+      prev.map((page) =>
+        isQAPage(page) && page.id === activePageId
+          ? {
+              ...page,
+              cards: page.cards.map((card) =>
+                card.id === selectedQACardId
+                  ? { ...card, answers: [...card.answers, nextAnswer] }
+                  : card
+              )
+            }
+          : page
+      )
+    );
+    setQaAnswerDraft("");
+  }, [activePageId, qaAnswerDraft, selectedQACardId]);
+
+  const handleDeletePage = useCallback(
+    (pageId: string) => {
+      setPages((prev) => {
+        const next = prev.filter((page) => page.id !== pageId);
+        if (pageId === activePageId) {
+          const fallback = next.find((page) => page.boardId === selectedBoardId) ?? next[0] ?? null;
+          setActivePageId(fallback?.id ?? "");
+        }
+        return next;
+      });
+      if (firebaseUser) {
+        deleteDoc(doc(db, "pages", pageId)).catch((error) => {
+          const message = error instanceof Error ? error.message : String(error);
+          setDataMessage(`ページ削除失敗: ${message}`);
+        });
+      }
+    },
+    [activePageId, selectedBoardId, firebaseUser]
+  );
+
+  const handleTitleChange = useCallback(
+    (value: string) => {
+      setPages((prev) => prev.map((page) => (page.id === activePageId ? { ...page, title: value } : page)));
+    },
+    [activePageId]
+  );
+
+  const handleMarkdownChange = useCallback(
+    (value: string) => {
+      setPages((prev) =>
+        prev.map((page) => (page.id === activePageId && isMarkdownPage(page) ? { ...page, content: value } : page))
+      );
+    },
+    [activePageId]
+  );
+
+  const handleRankingNoteChange = useCallback(
+    (value: string) => {
+      setPages((prev) =>
+        prev.map((page) => (isRankingPage(page) && page.id === activePageId ? { ...page, note: value } : page))
+      );
+    },
+    [activePageId]
+  );
+
+  const handleRankingItemTitleChange = useCallback(
+    (itemId: string, value: string) => {
+      setPages((prev) =>
+        prev.map((page) =>
+          isRankingPage(page) && page.id === activePageId
+            ? {
+                ...page,
+                items: page.items.map((item) => (item.id === itemId ? { ...item, title: value } : item))
+              }
+            : page
+        )
+      );
+    },
+    [activePageId]
+  );
+
+  const handleRankingItemBodyChange = useCallback(
+    (itemId: string, value: string) => {
+      setPages((prev) =>
+        prev.map((page) =>
+          isRankingPage(page) && page.id === activePageId
+            ? {
+                ...page,
+                items: page.items.map((item) => (item.id === itemId ? { ...item, body: value } : item))
+              }
+            : page
+        )
+      );
+    },
+    [activePageId]
+  );
+
+  const handleRankingAddItem = useCallback(() => {
+    const nextItem = createRankingItem("新しいカード", "");
+    setPages((prev) =>
+      prev.map((page) =>
+        isRankingPage(page) && page.id === activePageId ? { ...page, items: [nextItem, ...page.items] } : page
+      )
+    );
+  }, [activePageId]);
+
+  const handleRankingDeleteItem = useCallback(
+    (itemId: string) => {
+      setPages((prev) =>
+        prev.map((page) =>
+          isRankingPage(page) && page.id === activePageId
+            ? { ...page, items: page.items.filter((item) => item.id !== itemId) }
+            : page
+        )
+      );
+    },
+    [activePageId]
+  );
+
+  const handleRankingMoveItem = useCallback(
+    (itemId: string, direction: "up" | "down") => {
+      setPages((prev) =>
+        prev.map((page) => {
+          if (!isRankingPage(page) || page.id !== activePageId) return page;
+          const index = page.items.findIndex((item) => item.id === itemId);
+          if (index === -1) return page;
+          const nextIndex = direction === "up" ? Math.max(0, index - 1) : Math.min(page.items.length - 1, index + 1);
+          if (index === nextIndex) return page;
+          const nextItems = [...page.items];
+          const [moved] = nextItems.splice(index, 1);
+          nextItems.splice(nextIndex, 0, moved);
+          return { ...page, items: nextItems };
+        })
+      );
+    },
+    [activePageId]
+  );
+
+  const handleRankingDragStart = useCallback((itemId: string, event: React.DragEvent) => {
+    setDraggingRankingItemId(itemId);
+    event.dataTransfer.effectAllowed = "move";
+  }, []);
+
+  const handleRankingDragOver = useCallback((targetId: string, event: React.DragEvent) => {
+    event.preventDefault();
+    setDragOverRankingItemId(targetId);
+    event.dataTransfer.dropEffect = "move";
+  }, []);
+
+  const handleRankingDrop = useCallback((targetId: string) => {
+    if (!draggingRankingItemId || draggingRankingItemId === targetId) {
+      setDraggingRankingItemId(null);
+      setDragOverRankingItemId(null);
+      return;
+    }
+    setPages((prev) =>
+      prev.map((page) => {
+        if (!isRankingPage(page) || page.id !== activePageId) return page;
+        const fromIndex = page.items.findIndex((i) => i.id === draggingRankingItemId);
+        const toIndex = page.items.findIndex((i) => i.id === targetId);
+        if (fromIndex === -1 || toIndex === -1 || fromIndex === toIndex) return page;
+        const nextItems = [...page.items];
+        const [moved] = nextItems.splice(fromIndex, 1);
+        nextItems.splice(toIndex, 0, moved);
+        return { ...page, items: nextItems };
+      })
+    );
+    setDraggingRankingItemId(null);
+    setDragOverRankingItemId(null);
+  }, [activePageId, draggingRankingItemId]);
+
+  const handleDownloadMarkdown = useCallback(() => {
+    if (!isMarkdownPage(activePage)) return;
+    const blob = new Blob([activePage.content], { type: "text/markdown" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `${activePage.title || "idea-note"}.md`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }, [activePage]);
+
+  const handleOpenPreview = useCallback(() => {
+    if (!isMarkdownPage(activePage)) return;
+    (savePreviewPayload as any)({ title: activePage.title, content: activePage.content });
+    if (typeof window !== "undefined") {
+      window.open("/preview", "_blank", "noopener,noreferrer");
+    }
+  }, [activePage]);
+
+  const handleSelectedNodeTitleChange = useCallback(
+    (value: string) => {
+      if (!selectedNodeId) return;
+      setPages((prev) =>
+        prev.map((page) =>
+          isMindmapPage(page) && page.id === activePageId
+            ? {
+                ...page,
+                nodes: page.nodes.map((node) => (node.id === selectedNodeId ? { ...node, title: value } : node))
+              }
+            : page
+        )
+      );
+    },
+    [selectedNodeId, activePageId]
+  );
+  const handleSelectedNodeColorChange = useCallback(
+    (value: string) => {
+      if (!selectedNodeId) return;
+      setPages((prev) =>
+        prev.map((page) =>
+          isMindmapPage(page) && page.id === activePageId
+            ? {
+                ...page,
+                nodes: page.nodes.map((node) => (node.id === selectedNodeId ? { ...node, color: value } : node))
+              }
+            : page
+        )
+      );
+    },
+    [selectedNodeId, activePageId]
+  );
+
+  const handleSelectedNodeValueChange = useCallback(
+    (value: number) => {
+      if (!selectedNodeId) return;
+      const clampedValue = Math.max(1, Math.min(100, value));
+      setPages((prev) =>
+        prev.map((page) =>
+          isMindmapPage(page) && page.id === activePageId
+            ? {
+                ...page,
+                nodes: page.nodes.map((node) => (node.id === selectedNodeId ? { ...node, value: clampedValue } : node))
+              }
+            : page
+        )
+      );
+    },
+    [selectedNodeId, activePageId]
+  );
+
+  const handleSectionTextChange = useCallback(
+    (nodeId: string, sectionId: string, value: string) => {
+      setPages((prev) =>
+        prev.map((page) =>
+          isMindmapPage(page) && page.id === activePageId
+            ? {
+                ...page,
+                nodes: page.nodes.map((node) =>
+                  node.id === nodeId
+                    ? {
+                        ...node,
+                        sections: node.sections.map((section) =>
+                          section.id === sectionId ? { ...section, text: value } : section
+                        )
+                      }
+                    : node
+                )
+              }
+            : page
+        )
+      );
+    },
+    [activePageId]
+  );
+
+  const handleSectionFontSizeChange = useCallback(
+    (nodeId: string, sectionId: string, fontSize: number) => {
+      setPages((prev) =>
+        prev.map((page) =>
+          isMindmapPage(page) && page.id === activePageId
+            ? {
+                ...page,
+                nodes: page.nodes.map((node) =>
+                  node.id === nodeId
+                    ? {
+                        ...node,
+                        sections: node.sections.map((section) =>
+                          section.id === sectionId ? { ...section, fontSize } : section
+                        )
+                      }
+                    : node
+                )
+              }
+            : page
+        )
+      );
+    },
+    [activePageId]
+  );
+
+  const handleTextBoxFontSizeChange = useCallback(
+    (textBoxId: string, fontSize: number) => {
+      setPages((prev) =>
+        prev.map((page) =>
+          isMindmapPage(page) && page.id === activePageId
+            ? {
+                ...page,
+                textBoxes: (page.textBoxes || []).map((tb) =>
+                  tb.id === textBoxId ? { ...tb, fontSize } : tb
+                )
+              }
+            : page
+        )
+      );
+    },
+    [activePageId]
+  );
+
+  const handleAddSection = useCallback(
+    (nodeId: string) => {
+      setPages((prev) =>
+        prev.map((page) =>
+          isMindmapPage(page) && page.id === activePageId
+            ? {
+                ...page,
+                nodes: page.nodes.map((node) =>
+                  node.id === nodeId ? { ...node, sections: [...node.sections, createSection("新しいアイテム")] } : node
+                )
+              }
+            : page
+        )
+      );
+    },
+    [activePageId]
+  );
+
+  const handleDeleteSection = useCallback(
+    (nodeId: string, sectionId: string) => {
+      setPages((prev) =>
+        prev.map((page) =>
+          isMindmapPage(page) && page.id === activePageId
+            ? {
+                ...page,
+                nodes: page.nodes.map((node) =>
+                  node.id === nodeId
+                    ? {
+                        ...node,
+                        sections: node.sections.filter((section) => section.id !== sectionId)
+                      }
+                    : node
+                ),
+                links: page.links.filter(
+                  (link) =>
+                    !(link.from.nodeId === nodeId && link.from.sectionId === sectionId) &&
+                    !(link.to.nodeId === nodeId && link.to.sectionId === sectionId)
+                )
+              }
+            : page
+        )
+      );
+    },
+    [activePageId]
+  );
+
+  const handleMindmapAddNode = useCallback(() => {
+    if (!isMindmapPage(activePage)) return;
+    const newNode: MindmapNode = {
+      id: createId("node"),
+      title: DEFAULT_NODE_TITLE,
+      color: DEFAULT_NODE_COLOR,
+      value: 10,
+      x: 280 + Math.random() * 120,
+      y: 260 + Math.random() * 120,
+      sections: [createSection("新しいアイテム")]
+    };
+    setPages((prev) =>
+      prev.map((page) =>
+        isMindmapPage(page) && page.id === activePage.id
+          ? { ...page, nodes: [...page.nodes, newNode] }
+          : page
+      )
+    );
+    setSelectedNodeId(newNode.id);
+  }, [activePage]);
+
+  const handleMindmapAddTextBox = useCallback(() => {
+    if (!isMindmapPage(activePage)) return;
+    const newTextBox: MindmapTextBox = {
+      id: createId("textbox"),
+      text: "",
+      color: DEFAULT_NODE_COLOR,
+      value: 10,
+      x: 280 + Math.random() * 120,
+      y: 260 + Math.random() * 120
+    };
+    setPages((prev) =>
+      prev.map((page) =>
+        isMindmapPage(page) && page.id === activePage.id
+          ? { ...page, textBoxes: [...(page.textBoxes || []), newTextBox] }
+          : page
+      )
+    );
+    setSelectedTextBoxId(newTextBox.id);
+    setEditingTextBoxId(newTextBox.id);
+  }, [activePage]);
+
+  const handleDeleteTextBox = useCallback(() => {
+    if (!selectedTextBoxId || !isMindmapPage(activePage)) return;
+    setPages((prev) =>
+      prev.map((page) =>
+        isMindmapPage(page) && page.id === activePage.id
+          ? {
+              ...page,
+              textBoxes: page.textBoxes?.filter((tb) => tb.id !== selectedTextBoxId) || [],
+              links: page.links.filter(
+                (link) =>
+                  link.from.textBoxId !== selectedTextBoxId &&
+                  link.to.textBoxId !== selectedTextBoxId
+              )
+            }
+          : page
+      )
+    );
+    setSelectedTextBoxId(null);
+  }, [selectedTextBoxId, activePage]);
+
+  const handleSelectedTextBoxTextChange = useCallback(
+    (text: string) => {
+      if (!editingTextBoxId || !isMindmapPage(activePage)) return;
+      setPages((prev) =>
+        prev.map((page) =>
+          isMindmapPage(page) && page.id === activePage.id
+            ? {
+                ...page,
+                textBoxes: page.textBoxes?.map((tb) =>
+                  tb.id === editingTextBoxId ? { ...tb, text } : tb
+                ) || []
+              }
+            : page
+        )
+      );
+    },
+    [editingTextBoxId, activePage]
+  );
+
+  const handleSelectedTextBoxColorChange = useCallback(
+    (color: string) => {
+      if (!selectedTextBoxId || !isMindmapPage(activePage)) return;
+      setPages((prev) =>
+        prev.map((page) =>
+          isMindmapPage(page) && page.id === activePage.id
+            ? {
+                ...page,
+                textBoxes: page.textBoxes?.map((tb) =>
+                  tb.id === selectedTextBoxId ? { ...tb, color } : tb
+                ) || []
+              }
+            : page
+        )
+      );
+    },
+    [selectedTextBoxId, activePage]
+  );
+
+  const handleSelectedTextBoxValueChange = useCallback(
+    (value: number) => {
+      if (!selectedTextBoxId || !isMindmapPage(activePage)) return;
+      const clampedValue = Math.max(1, Math.min(100, value));
+      setPages((prev) =>
+        prev.map((page) =>
+          isMindmapPage(page) && page.id === activePage.id
+            ? {
+                ...page,
+                textBoxes: page.textBoxes?.map((tb) =>
+                  tb.id === selectedTextBoxId ? { ...tb, value: clampedValue } : tb
+                ) || []
+              }
+            : page
+        )
+      );
+    },
+    [selectedTextBoxId, activePage]
+  );
+
+  const handleDeleteNode = useCallback(() => {
+    if (!selectedNodeId || !isMindmapPage(activePage)) return;
+    setPages((prev) =>
+      prev.map((page) =>
+        isMindmapPage(page) && page.id === activePage.id
+          ? {
+              ...page,
+              nodes: page.nodes.filter((node) => node.id !== selectedNodeId),
+              links: page.links.filter(
+                (link) =>
+                  link.from.nodeId !== selectedNodeId &&
+                  link.to.nodeId !== selectedNodeId
+              )
+            }
+          : page
+      )
+    );
+    setSelectedNodeId(null);
+  }, [selectedNodeId, activePage]);
+
+  const handleNodeDragStart = useCallback(
+    (event: ReactMouseEvent, node: MindmapNode) => {
+      if (!isMindmapPage(activePage)) return;
+      const rect = mindmapCanvasRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      event.preventDefault();
+      const relativeX = (event.clientX - rect.left) / mindmapScale;
+      const relativeY = (event.clientY - rect.top) / mindmapScale;
+      setDragging({
+        pageId: activePage.id,
+        nodeId: node.id,
+        offsetX: relativeX - node.x,
+        offsetY: relativeY - node.y
+      });
+    },
+    [activePage, mindmapScale]
+  );
+
+  const handleTextBoxDragStart = useCallback(
+    (event: ReactMouseEvent, textBox: MindmapTextBox) => {
+      if (!isMindmapPage(activePage)) return;
+      const rect = mindmapCanvasRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      event.preventDefault();
+      const relativeX = (event.clientX - rect.left) / mindmapScale;
+      const relativeY = (event.clientY - rect.top) / mindmapScale;
+      setDragging({
+        pageId: activePage.id,
+        textBoxId: textBox.id,
+        offsetX: relativeX - textBox.x,
+        offsetY: relativeY - textBox.y
+      });
+    },
+    [activePage, mindmapScale]
+  );
+
+  useEffect(() => {
+    const handleMove = (event: MouseEvent) => {
+      if (!dragging) return;
+      setPages((prev) =>
+        prev.map((page) => {
+          if (!isMindmapPage(page) || page.id !== dragging.pageId) return page;
+          const rect = mindmapCanvasRef.current?.getBoundingClientRect();
+          if (!rect) return page;
+          const relativeX = (event.clientX - rect.left) / mindmapScale;
+          const relativeY = (event.clientY - rect.top) / mindmapScale;
+          const nextX = relativeX - dragging.offsetX;
+          const nextY = relativeY - dragging.offsetY;
+          
+          if (dragging.nodeId) {
+            return {
+              ...page,
+              nodes: page.nodes.map((node) => (node.id === dragging.nodeId ? { ...node, x: nextX, y: nextY } : node))
+            };
+          } else if (dragging.textBoxId) {
+            return {
+              ...page,
+              textBoxes: (page.textBoxes || []).map((tb) => (tb.id === dragging.textBoxId ? { ...tb, x: nextX, y: nextY } : tb))
+            };
+          }
+          return page;
+        })
+      );
+    };
+    const handleUp = () => setDragging(null);
+    window.addEventListener("mousemove", handleMove);
+    window.addEventListener("mouseup", handleUp);
+    return () => {
+      window.removeEventListener("mousemove", handleMove);
+      window.removeEventListener("mouseup", handleUp);
+    };
+  }, [dragging, mindmapScale]);
+
+  useEffect(() => {
+    if (!linkingFrom) return;
+    const handleMove = (event: MouseEvent) => {
+        const rect = mindmapCanvasRef.current?.getBoundingClientRect();
+        if (!rect) return;
+        const relativeX = (event.clientX - rect.left) / mindmapScale;
+        const relativeY = (event.clientY - rect.top) / mindmapScale;
+        setLinkingCursor({ x: relativeX, y: relativeY });
+      };
+    const handleUp = () => {
+        setLinkingFrom(null);
+        setLinkingCursor(null);
+      };
+      window.addEventListener("mousemove", handleMove);
+      window.addEventListener("mouseup", handleUp);
+      return () => {
+        window.removeEventListener("mousemove", handleMove);
+        window.removeEventListener("mouseup", handleUp);
+      };
+  }, [linkingFrom, mindmapScale]);
+
+  const handleConnectorDrop = useCallback(
+      (target: MindmapConnector) => {
+        if (!isMindmapPage(activePage) || !linkingFrom) return;
+        
+        // バリデーション：メモ同士の接続は禁止
+        const fromIsTextBox = !!linkingFrom.textBoxId;
+        const toIsTextBox = !!target.textBoxId;
+        if (fromIsTextBox && toIsTextBox) {
+          setLinkingFrom(null);
+          setLinkingCursor(null);
+          return;
+        }
+        
+        // バリデーション：メモはパネルとしか接続できない
+        if (fromIsTextBox && !toIsTextBox) {
+          // OKメモ→パネル
+        } else if (!fromIsTextBox && toIsTextBox) {
+          // OKパネル→メモ
+        } else if (!fromIsTextBox && !toIsTextBox) {
+          // OKパネル→パネル
+        }
+        
+        if (
+          linkingFrom.nodeId === target.nodeId &&
+          linkingFrom.textBoxId === target.textBoxId &&
+          linkingFrom.sectionId === target.sectionId &&
+          linkingFrom.side === target.side
+        ) {
+          setLinkingFrom(null);
+          setLinkingCursor(null);
+          return;
+        }
+        const fromKey = linkingFrom.textBoxId ? `tb:${linkingFrom.textBoxId}:${linkingFrom.side}` : `node:${linkingFrom.nodeId}:${linkingFrom.sectionId}:${linkingFrom.side}`;
+        const toKey = target.textBoxId ? `tb:${target.textBoxId}:${target.side}` : `node:${target.nodeId}:${target.sectionId}:${target.side}`;
+        const exists = activePage.links.some(
+          (link) => {
+            const linkFromKey = link.from.textBoxId ? `tb:${link.from.textBoxId}:${link.from.side}` : `node:${link.from.nodeId}:${link.from.sectionId}:${link.from.side}`;
+            const linkToKey = link.to.textBoxId ? `tb:${link.to.textBoxId}:${link.to.side}` : `node:${link.to.nodeId}:${link.to.sectionId}:${link.to.side}`;
+            return (linkFromKey === fromKey && linkToKey === toKey) || (linkFromKey === toKey && linkToKey === fromKey);
+          }
+        );
+        if (exists) {
+          setLinkingFrom(null);
+          setLinkingCursor(null);
+          return;
+        }
+        const newLink: MindmapLink = { id: createId("link"), from: linkingFrom, to: target };
+        setPages((prev) =>
+          prev.map((page) => {
+            if (!isMindmapPage(page) || page.id !== activePage.id) return page;
+            
+            // 新しいリンクを追加したページの状態
+            const pageWithNewLink = { ...page, links: [...page.links, newLink] };
+            
+            // メモの値を接続パネルの平均値に更新
+            const updatedTextBoxes = (pageWithNewLink.textBoxes || []).map((tb) => {
+              // 更新対象のメモを特定
+              const targetTextBoxId = fromIsTextBox ? linkingFrom.textBoxId : toIsTextBox ? target.textBoxId : null;
+              if (!targetTextBoxId || tb.id !== targetTextBoxId) return tb;
+              
+              // このメモに接続されているすべてのパネルを取得
+              const connectedNodeIds = new Set<string>();
+              pageWithNewLink.links.forEach((link) => {
+                if (link.from.textBoxId === targetTextBoxId && link.to.nodeId) {
+                  connectedNodeIds.add(link.to.nodeId);
+                }
+                if (link.to.textBoxId === targetTextBoxId && link.from.nodeId) {
+                  connectedNodeIds.add(link.from.nodeId);
+                }
+              });
+              
+              // 接続されたパネルの平均値を計算
+              if (connectedNodeIds.size > 0) {
+                const connectedNodes = Array.from(connectedNodeIds)
+                  .map((nodeId) => pageWithNewLink.nodes.find((n) => n.id === nodeId))
+                  .filter((n) => n !== undefined) as MindmapNode[];
+                if (connectedNodes.length > 0) {
+                  const avgValue = Math.round(
+                    connectedNodes.reduce((sum, n) => sum + n.value, 0) / connectedNodes.length
+                  );
+                  return { ...tb, value: Math.max(1, avgValue) };
+                }
+              }
+              return tb;
+            });
+            
+            return { ...pageWithNewLink, textBoxes: updatedTextBoxes };
+          })
+        );
+        setLinkingFrom(null);
+        setLinkingCursor(null);
+      },
+      [isMindmapPage, activePage, linkingFrom]
+    );
+
+  const handleConnectorMouseDown = useCallback(
+      (event: ReactMouseEvent, connector: MindmapConnector) => {
+        if (event.button !== 0) return;
+        if (!isMindmapPage(activePage)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        
+        // テキストボックスの場合
+        if (connector.textBoxId) {
+          const textBox = activePage.textBoxes?.find((tb) => tb.id === connector.textBoxId);
+          if (!textBox) return;
+          setSelectedTextBoxId(connector.textBoxId);
+          setLinkingFrom(connector);
+          setLinkingCursor({ x: textBox.x, y: textBox.y });
+          return;
+        }
+        
+        // ノード（パネル）の場合
+        if (!connector.nodeId || !connector.sectionId) return;
+        const node = activePage.nodes.find((candidate) => candidate.id === connector.nodeId);
+        if (!node) return;
+        const section = node.sections.find((s) => s.id === connector.sectionId);
+        if (!section) return;
+        const anchor = getSectionAnchorPosition(node, section, connector.side);
+        setSelectedNodeId(connector.nodeId);
+        setLinkingFrom(connector);
+        setLinkingCursor(anchor);
+      },
+      [activePage]
+    );
+
+  const handleDeleteLink = useCallback(
+    (connector: MindmapConnector) => {
+      if (!isMindmapPage(activePage)) return;
+      setPages((prev) =>
+        prev.map((page) =>
+          isMindmapPage(page) && page.id === activePage.id
+            ? {
+                ...page,
+                links: page.links.filter(
+                  (link) =>
+                    !(link.from.nodeId === connector.nodeId &&
+                      link.from.sectionId === connector.sectionId &&
+                      link.from.side === connector.side) &&
+                    !(link.to.nodeId === connector.nodeId &&
+                      link.to.sectionId === connector.sectionId &&
+                      link.to.side === connector.side)
+                )
+              }
+            : page
+        )
+      );
+    },
+    [activePage]
+  );
+
+  const getRowsForText = (text: string): number => {
+    const lineCount = (text.match(/\n/g) || []).length + 1;
+    return Math.max(1, lineCount);
+  };
+  const renderMindmap = (page: MindmapPage) => {
+    const selectedNode = page.nodes.find((node) => node.id === selectedNodeId) ?? null;
+    const selectedTextBox = (page.textBoxes || []).find((tb) => tb.id === selectedTextBoxId) ?? null;
+    return (
+      <>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <input
+            value={page.title}
+            onChange={(event) => handleTitleChange(event.target.value)}
+            placeholder="ページタイトル"
+            style={{
+              width: "100%",
+              border: "none",
+              borderBottom: `2px solid var(--border)`,
+              background: "transparent",
+              color: "inherit",
+              fontSize: 24,
+              fontWeight: 600,
+              paddingBottom: 12,
+              marginBottom: 8
+            }}
+          />
+          <button
+            type="button"
+            onClick={() => setIsToolsOpen(!isToolsOpen)}
+            title={isToolsOpen ? "ツールを閉じる" : "ツールを開く"}
+            style={{
+              border: "none",
+              background: "transparent",
+              color: "inherit",
+              cursor: "pointer",
+              fontSize: 20,
+              padding: "0.5rem",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              flexShrink: 0
+            }}
+          >
+            {isToolsOpen ? <RxDoubleArrowUp /> : <RxDoubleArrowDown />}
+          </button>
+        </div>
+        {isToolsOpen && (
+          <>
+            <div
+              style={{
+                display: "flex",
+                flexWrap: "wrap",
+                gap: 16,
+                alignItems: "center",
+                justifyContent: "space-between"
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  flexWrap: "wrap",
+                  gap: 12,
+                  alignItems: "center",
+              minWidth: 0
+            }}
+          >
+            <label style={{ display: "flex", flexDirection: "column", fontSize: 12, gap: 4 }}>
+              <span style={{ opacity: 0.8 }}>ヘッダータイトル</span>
+              <input
+                value={selectedNode?.title ?? ""}
+                onChange={(event) => handleSelectedNodeTitleChange(event.target.value)}
+                placeholder="パネル名"
+                disabled={!selectedNode}
+                style={{
+                  minWidth: 160,
+                  borderRadius: 10,
+                  border: `1px solid var(--border)`,
+                  padding: "0.35rem 0.5rem",
+                  background: selectedNode ? "var(--panel)" : "var(--panel-minor)",
+                  color: "inherit",
+                  cursor: selectedNode ? "text" : "not-allowed",
+                  opacity: selectedNode ? 1 : 0.5
+                }}
+              />
+            </label>
+            <label style={{ display: "flex", flexDirection: "column", fontSize: 12, gap: 4 }}>
+              <span style={{ opacity: 0.8 }}>値（1-100）</span>
+              <input
+                type="number"
+                min="1"
+                max="100"
+                value={selectedNode?.value ?? 50}
+                onChange={(event) => handleSelectedNodeValueChange(parseInt(event.target.value) || 50)}
+                disabled={!selectedNode}
+                style={{
+                  width: 80,
+                  borderRadius: 10,
+                  border: `1px solid var(--border)`,
+                  padding: "0.35rem 0.5rem",
+                  background: selectedNode ? "var(--panel)" : "var(--panel-minor)",
+                  color: "inherit",
+                  cursor: selectedNode ? "text" : "not-allowed",
+                  opacity: selectedNode ? 1 : 0.5
+                }}
+              />
+            </label>
+            <label style={{ display: "flex", flexDirection: "column", fontSize: 12, gap: 4 }}>
+              <span style={{ opacity: 0.8 }}>アイテム文字サイズ</span>
+              <input
+                type="number"
+                min="8"
+                max="32"
+                value={selectedNode && selectedSectionId ? selectedNode.sections.find(s => s.id === selectedSectionId)?.fontSize ?? 12 : 12}
+                onChange={(event) => {
+                  if (selectedNode && selectedSectionId) {
+                    handleSectionFontSizeChange(selectedNode.id, selectedSectionId, parseInt(event.target.value) || 12);
+                  }
+                }}
+                disabled={!selectedNode || !selectedSectionId}
+                style={{
+                  width: 80,
+                  borderRadius: 10,
+                  border: `1px solid var(--border)`,
+                  padding: "0.35rem 0.5rem",
+                  background: selectedNode && selectedSectionId ? "var(--panel)" : "var(--panel-minor)",
+                  color: "inherit",
+                  cursor: selectedNode && selectedSectionId ? "text" : "not-allowed",
+                  opacity: selectedNode && selectedSectionId ? 1 : 0.5
+                }}
+              />
+            </label>
+            <label style={{ display: "flex", flexDirection: "column", fontSize: 12, gap: 4 }}>
+              <span style={{ opacity: 0.8 }}>メモ文字サイズ</span>
+              <input
+                type="number"
+                min="8"
+                max="32"
+                value={selectedTextBox?.fontSize ?? 11}
+                onChange={(event) => {
+                  if (selectedTextBox) {
+                    handleTextBoxFontSizeChange(selectedTextBox.id, parseInt(event.target.value) || 11);
+                  }
+                }}
+                disabled={!selectedTextBox}
+                style={{
+                  width: 80,
+                  borderRadius: 10,
+                  border: `1px solid var(--border)`,
+                  padding: "0.35rem 0.5rem",
+                  background: selectedTextBox ? "var(--panel)" : "var(--panel-minor)",
+                  color: "inherit",
+                  cursor: selectedTextBox ? "text" : "not-allowed",
+                  opacity: selectedTextBox ? 1 : 0.5
+                }}
+              />
+            </label>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ fontSize: 12, opacity: 0.8 }}>ヘッダー色</span>
+              {NODE_COLOR_PRESETS.slice(0, 4).map((color) => {
+                const isActive = (selectedNode?.color ?? DEFAULT_NODE_COLOR) === color;
+                return (
+                  <button
+                    key={color}
+                    type="button"
+                    disabled={!selectedNode}
+                    onClick={() => selectedNode && handleSelectedNodeColorChange(color)}
+                    style={{
+                      width: 28,
+                      height: 28,
+                      borderRadius: 8,
+                      border: isActive ? `2px solid var(--accent)` : `1px solid var(--border)`,
+                      background: color,
+                      cursor: selectedNode ? "pointer" : "not-allowed",
+                      opacity: selectedNode ? 1 : 0.35
+                    }}
+                  />
+                );
+              })}
+              <input
+                type="color"
+                disabled={!selectedNode}
+                value={selectedNode?.color ?? DEFAULT_NODE_COLOR}
+                onChange={(event) => selectedNode && handleSelectedNodeColorChange(event.target.value)}
+                title="カラーピッカー"
+                style={{
+                  width: 28,
+                  height: 28,
+                  borderRadius: 8,
+                  border: `1px solid var(--border)`,
+                  cursor: selectedNode ? "pointer" : "not-allowed",
+                  opacity: selectedNode ? 1 : 0.35,
+                  padding: 2
+                }}
+              />
+            </div>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <span style={{ fontSize: 12, opacity: 0.8 }}>ズーム</span>
+            <button
+              type="button"
+              onClick={handleZoomOut}
+              aria-label="ズームアウト"
+              style={{
+                width: 28,
+                height: 28,
+                borderRadius: 8,
+                border: `1px solid var(--border)`,
+                background: "var(--panel-minor)",
+                color: "inherit",
+                cursor: "pointer",
+                fontSize: 11
+              }}
+            >
+              -
+            </button>
+            <span
+              style={{
+                minWidth: 40,
+                textAlign: "center",
+                fontVariantNumeric: "tabular-nums",
+                fontSize: 11
+              }}
+            >
+              {Math.round(mindmapScale * 100)}%
+            </span>
+            <button
+              type="button"
+              onClick={handleZoomIn}
+              aria-label="ズームイン"
+              style={{
+                width: 28,
+                height: 28,
+                borderRadius: 8,
+                border: `1px solid var(--border)`,
+                background: "var(--panel-minor)",
+                color: "inherit",
+                cursor: "pointer",
+                fontSize: 11
+              }}
+            >
+              +
+            </button>
+            <button
+              type="button"
+              onClick={handleZoomReset}
+              style={{
+                borderRadius: 8,
+                border: `1px solid var(--border)`,
+                background: "transparent",
+                color: "inherit",
+                padding: "0.25rem 0.5rem",
+                cursor: "pointer",
+                fontSize: 11
+              }}
+            >
+              リセット
+            </button>
+            <button
+              type="button"
+              onClick={handleFitAllNodes}
+              style={{
+                borderRadius: 8,
+                border: `1px solid var(--border)`,
+                background: "transparent",
+                color: "inherit",
+                padding: "0.25rem 0.5rem",
+                cursor: "pointer",
+                fontSize: 11
+              }}
+            >
+              全表示
+            </button>
+            <button
+              type="button"
+              onClick={handleFocusNode}
+              disabled={!selectedNodeId}
+              style={{
+                borderRadius: 8,
+                border: `1px solid var(--border)`,
+                background: selectedNodeId ? "transparent" : "var(--panel-minor)",
+                color: "inherit",
+                padding: "0.25rem 0.5rem",
+                cursor: selectedNodeId ? "pointer" : "not-allowed",
+                fontSize: 11,
+                opacity: selectedNodeId ? 1 : 0.5
+              }}
+            >
+              フォーカス
+            </button>
+            <button
+              type="button"
+              onClick={handleMindmapAddNode}
+              style={{
+                borderRadius: 8,
+                border: `1px dashed var(--border)`,
+                background: "var(--panel-minor)",
+                color: "inherit",
+                padding: "0.25rem 0.5rem",
+                cursor: "pointer",
+                fontSize: 11
+              }}
+            >
+              +パネル
+            </button>
+            <button
+              type="button"
+              onClick={handleMindmapAddTextBox}
+              style={{
+                borderRadius: 8,
+                border: `1px dashed var(--border)`,
+                background: "var(--panel-minor)",
+                color: "inherit",
+                padding: "0.25rem 0.5rem",
+                cursor: "pointer",
+                fontSize: 11
+              }}
+            >
+              +メモ
+            </button>
+            <button
+              type="button"
+              onClick={() => selectedNode && handleAddSection(selectedNode.id)}
+              disabled={!selectedNode}
+              style={{
+                borderRadius: 8,
+                border: `1px dashed var(--border)`,
+                background: selectedNode ? "var(--panel-minor)" : "var(--panel-minor)",
+                color: "inherit",
+                padding: "0.25rem 0.5rem",
+                cursor: selectedNode ? "pointer" : "not-allowed",
+                fontSize: 11,
+                opacity: selectedNode ? 1 : 0.5
+              }}
+            >
+              +アイテム
+            </button>
+            <button
+              type="button"
+              onClick={() => selectedNode && selectedSectionId && handleDeleteSection(selectedNode.id, selectedSectionId)}
+              disabled={!selectedNode || !selectedSectionId || selectedNode.sections.length <= 1}
+              style={{
+                display: "none"
+              }}
+            >
+              -パネル
+            </button>
+          </div>
+        </div>
+        </>
+        )}
+        <div
+          ref={mindmapContainerRef}
+          onWheel={handleMindmapWheel}
+          onMouseDown={handleMindmapMouseDown}
+          style={{
+            position: "relative",
+            flex: 1,
+            minHeight: 520,
+            borderRadius: 24,
+            border: `1px solid var(--border)`,
+            background: "var(--panel-minor)",
+            overflow: "hidden",
+            cursor: isPanning ? "grabbing" : "grab"
+          }}
+        >
+          <div
+            ref={mindmapCanvasRef}
+            style={{
+              position: "relative",
+              width: MINDMAP_WIDTH,
+              height: MINDMAP_HEIGHT,
+              transform: `translate(${mindmapPan.x}px, ${mindmapPan.y}px) scale(${mindmapScale})`,
+              transformOrigin: "top left",
+              transition: isPanning ? "none" : "transform 0.15s ease-out",
+              overflow: "visible"
+            }}
+          >
+            <svg
+              width={MINDMAP_WIDTH}
+              height={MINDMAP_HEIGHT}
+              style={{ position: "absolute", inset: 0, pointerEvents: "none", zIndex: 0, overflow: "visible" }}
+            >
+              <defs>
+                <filter id="glow">
+                  <feGaussianBlur stdDeviation="2" result="coloredBlur"/>
+                  <feMerge>
+                    <feMergeNode in="coloredBlur"/>
+                    <feMergeNode in="SourceGraphic"/>
+                  </feMerge>
+                </filter>
+              </defs>
+              {page.links.map((link) => {
+                let fromPos: { x: number; y: number } | null = null;
+                let toPos: { x: number; y: number } | null = null;
+                let fromValue = 50;
+                let toValue = 50;
+
+                // 接続元の位置と値を取得
+                if (link.from.textBoxId) {
+                  const fromTextBox = page.textBoxes?.find((tb) => tb.id === link.from.textBoxId);
+                  if (!fromTextBox) return null;
+                  fromPos = getTextBoxAnchorPosition(fromTextBox, link.from.side as "left" | "right");
+                  fromValue = fromTextBox.value;
+                } else if (link.from.nodeId && link.from.sectionId) {
+                  const fromNode = page.nodes.find((node) => node.id === link.from.nodeId);
+                  if (!fromNode) return null;
+                  const fromSection = fromNode.sections.find((section) => section.id === link.from.sectionId);
+                  if (!fromSection) return null;
+                  fromPos = getSectionAnchorPosition(fromNode, fromSection, link.from.side ?? "right");
+                  fromValue = fromNode.value;
+                }
+
+                // 接続先の位置と値を取得
+                if (link.to.textBoxId) {
+                  const toTextBox = page.textBoxes?.find((tb) => tb.id === link.to.textBoxId);
+                  if (!toTextBox) return null;
+                  toPos = getTextBoxAnchorPosition(toTextBox, link.to.side as "left" | "right");
+                  toValue = toTextBox.value;
+                } else if (link.to.nodeId && link.to.sectionId) {
+                  const toNode = page.nodes.find((node) => node.id === link.to.nodeId);
+                  if (!toNode) return null;
+                  const toSection = toNode.sections.find((section) => section.id === link.to.sectionId);
+                  if (!toSection) return null;
+                  toPos = getSectionAnchorPosition(toNode, toSection, link.to.side ?? "left");
+                  toValue = toNode.value;
+                }
+
+                if (!fromPos || !toPos) return null;
+
+                // メモが関わっている場合は、パネル側の値のみを使用
+                let strokeWidth: number;
+                if (link.from.textBoxId) {
+                  // メモ→パネル：接続先（パネル）の値を使用
+                  const toNode = page.nodes.find((node) => node.id === link.to.nodeId);
+                  strokeWidth = toNode ? 1 + (toNode.value / 100) * 12 : 7;
+                } else if (link.to.textBoxId) {
+                  // パネル→メモ：接続元（パネル）の値を使用
+                  const fromNode = page.nodes.find((node) => node.id === link.from.nodeId);
+                  strokeWidth = fromNode ? 1 + (fromNode.value / 100) * 12 : 7;
+                } else {
+                  // パネル→パネル：平均値を使用（元の動作）
+                  const fromStrokeWidth = 1 + (fromValue / 100) * 12;
+                  const toStrokeWidth = 1 + (toValue / 100) * 12;
+                  strokeWidth = (fromStrokeWidth + toStrokeWidth) / 2;
+                }
+
+                // グロウ強度とセグメント計算
+                const avgValue = (fromValue + toValue) / 2;
+                const glowIntensity = avgValue / 100;
+
+                // 線を10セグメントに分割してグラデーション効果を作る
+                const segments = 10;
+                const lineSegments = [];
+                const isTextBoxInvolved = link.from.textBoxId || link.to.textBoxId;
+                
+                for (let i = 0; i < segments; i++) {
+                  const t1 = i / segments;
+                  const t2 = (i + 1) / segments;
+                  const x1 = fromPos.x + (toPos.x - fromPos.x) * t1;
+                  const y1 = fromPos.y + (toPos.y - fromPos.y) * t1;
+                  const x2 = fromPos.x + (toPos.x - fromPos.x) * t2;
+                  const y2 = fromPos.y + (toPos.y - fromPos.y) * t2;
+                  
+                  let segmentWidth: number;
+                  let segmentOpacity: number;
+                  
+                  if (isTextBoxInvolved) {
+                    // メモが関わっている場合：太さは一定、不透明度も一定
+                    segmentWidth = strokeWidth;
+                    segmentOpacity = 0.7;
+                  } else {
+                    // パネル→パネル：グラデーション効果
+                    const fromStrokeWidth = 1 + (fromValue / 100) * 12;
+                    const toStrokeWidth = 1 + (toValue / 100) * 12;
+                    const normalizedWidth = (strokeWidth - 1) / 12; // 0～1に正規化
+                    segmentWidth = fromStrokeWidth + (toStrokeWidth - fromStrokeWidth) * ((t1 + t2) / 2);
+                    
+                    if (theme === "dark") {
+                      segmentOpacity = 0.4 + normalizedWidth * 0.6;
+                    } else {
+                      segmentOpacity = 1.0 - normalizedWidth * 0.6;
+                    }
+                  }
+                  
+                  lineSegments.push({ x1, y1, x2, y2, width: segmentWidth, opacity: segmentOpacity });
+                }
+                
+                return (
+                  <g key={link.id}>
+                    {/* グロウ用の背景線セグメント */}
+                    {lineSegments.map((seg, idx) => (
+                      <line
+                        key={`glow-${idx}`}
+                        x1={seg.x1}
+                        y1={seg.y1}
+                        x2={seg.x2}
+                        y2={seg.y2}
+                        stroke="#94a3b8"
+                        strokeWidth={seg.width + 2}
+                        opacity={glowIntensity * 0.3}
+                        filter="url(#glow)"
+                      />
+                    ))}
+                    {/* メイン線セグメント */}
+                    {lineSegments.map((seg, idx) => (
+                      <line
+                        key={`main-${idx}`}
+                        x1={seg.x1}
+                        y1={seg.y1}
+                        x2={seg.x2}
+                        y2={seg.y2}
+                        stroke="#94a3b8"
+                        strokeWidth={seg.width}
+                        opacity={seg.opacity}
+                      />
+                    ))}
+                  </g>
+                );
+              })}
+              {linkingFrom && linkingCursor && (() => {
+                // テキストボックスからの接続の場合
+                if (linkingFrom.textBoxId) {
+                  const sourceTextBox = page.textBoxes?.find((tb) => tb.id === linkingFrom.textBoxId);
+                  if (!sourceTextBox) return null;
+                  const sourceAnchor = getTextBoxAnchorPosition(sourceTextBox, linkingFrom.side as "left" | "right");
+                  return (
+                    <line
+                      x1={sourceAnchor.x}
+                      y1={sourceAnchor.y}
+                      x2={linkingCursor.x}
+                      y2={linkingCursor.y}
+                      stroke="#60a5fa"
+                      strokeWidth={2}
+                      strokeDasharray="4 4"
+                    />
+                  );
+                }
+                
+                // ノード（パネル）からの接続の場合
+                const sourceNode = page.nodes.find((node) => node.id === linkingFrom.nodeId);
+                if (!sourceNode) return null;
+                const sourceSection = sourceNode.sections.find((s) => s.id === linkingFrom.sectionId);
+                if (!sourceSection) return null;
+                const anchor = getSectionAnchorPosition(sourceNode, sourceSection, linkingFrom.side);
+                return (
+                  <line
+                    x1={anchor.x}
+                    y1={anchor.y}
+                    x2={linkingCursor.x}
+                    y2={linkingCursor.y}
+                    stroke="#60a5fa"
+                    strokeWidth={2}
+                    strokeDasharray="4 4"
+                  />
+                );
+              })()}
+            </svg>
+            {page.nodes.map((node) => {
+              const isLinkingSource = linkingFrom?.nodeId === node.id;
+              const nodeColor = node.color ?? DEFAULT_NODE_COLOR;
+              const nodeTitle = node.title || DEFAULT_NODE_TITLE;
+              return (
+                <div
+                  key={node.id}
+                  style={{
+                    position: "absolute",
+                    left: node.x,
+                    top: node.y,
+                    width: NODE_WIDTH,
+                    borderRadius: 16,
+                    border: isLinkingSource ? "2px solid #60a5fa" : `1px solid var(--border)`,
+                    boxShadow: isLinkingSource
+                      ? `0 0 0 2px rgba(96,165,250,0.35), 0 0 16px 8px ${theme === "dark" ? `rgba(255,255,255,${Math.min(1, node.value / 35)})` : `rgba(0,0,0,${Math.min(0.3, node.value / 117)})`}`
+                      : `0 0 16px 8px ${theme === "dark" ? `rgba(255,255,255,${Math.min(1, node.value / 35)})` : `rgba(0,0,0,${Math.min(0.3, node.value / 117)})`}`,
+                    background: "var(--panel-overlay)",
+                    display: "flex",
+                    flexDirection: "column",
+                    overflow: "hidden",
+                    zIndex: 1,
+                    transition: "box-shadow 0.2s ease"
+                  }}
+                  onMouseDownCapture={() => {
+                    setSelectedNodeId(node.id);
+                    setSelectedSectionId(null);
+                  }}
+                >
+                  <div
+                    onMouseDown={(event) => {
+                      setSelectedNodeId(node.id);
+                      handleNodeDragStart(event, node);
+                    }}
+                    onContextMenu={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      setContextMenu({
+                        x: event.clientX,
+                        y: event.clientY,
+                        type: "node",
+                        nodeId: node.id
+                      });
+                    }}
+                    aria-label="パネルをドラッグ"
+                    style={{
+                      cursor: "grab",
+                      padding: "0.35rem 0.6rem",
+                      background: nodeColor,
+                      color: "#fff",
+                      fontSize: 12,
+                      fontWeight: 600,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      userSelect: "none",
+                      boxShadow: "inset 0 -1px 0 rgba(255,255,255,0.25)",
+                      borderBottom: "1px solid rgba(0,0,0,0.2)",
+                      transition: "none",
+                      gap: 8
+                    }}
+                  >
+                    <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <span
+                        aria-hidden="true"
+                        style={{
+                          width: 14,
+                          height: 14,
+                          borderRadius: "50%",
+                          background: "rgba(255,255,255,0.35)",
+                          boxShadow: "inset 0 0 0 1px rgba(0,0,0,0.2)"
+                        }}
+                      />
+                      <span>{nodeTitle}</span>
+                    </span>
+                    <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                      <span
+                        style={{
+                          background: "rgba(0,0,0,0.3)",
+                          borderRadius: 6,
+                          padding: "0.15rem 0.5rem",
+                          fontSize: 10,
+                          fontWeight: 700,
+                          minWidth: 24,
+                          textAlign: "center"
+                        }}
+                      >
+                        {node.value}
+                      </span>
+                      <span
+                        aria-hidden="true"
+                        style={{
+                          width: 0,
+                          height: 0,
+                          borderLeft: "6px solid transparent",
+                          borderRight: "6px solid transparent",
+                          borderTop: "6px solid rgba(255,255,255,0.8)"
+                        }}
+                      />
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4, padding: "0.3rem" }}>
+                    {node.sections.map((section) => {
+                      const isLeftActive =
+                        linkingFrom?.nodeId === node.id &&
+                        linkingFrom?.sectionId === section.id &&
+                        linkingFrom?.side === "left";
+                      const isRightActive =
+                        linkingFrom?.nodeId === node.id &&
+                        linkingFrom?.sectionId === section.id &&
+                        linkingFrom?.side === "right";
+                      const isSectionLinking = isLeftActive || isRightActive;
+                      const hasLeftConnection = page.links.some(
+                        (link) =>
+                          (link.from.nodeId === node.id &&
+                            link.from.sectionId === section.id &&
+                            link.from.side === "left") ||
+                          (link.to.nodeId === node.id &&
+                            link.to.sectionId === section.id &&
+                            link.to.side === "left")
+                      );
+                      const hasRightConnection = page.links.some(
+                        (link) =>
+                          (link.from.nodeId === node.id &&
+                            link.from.sectionId === section.id &&
+                            link.from.side === "right") ||
+                          (link.to.nodeId === node.id &&
+                            link.to.sectionId === section.id &&
+                            link.to.side === "right")
+                      );
+                      return (
+                        <div
+                          key={section.id}
+                          onClick={() => setSelectedSectionId(section.id)}
+                          style={{
+                            minHeight: NODE_SECTION_HEIGHT,
+                            border: isSectionLinking ? `2px solid var(--accent)` : selectedSectionId === section.id ? `2px solid var(--accent)` : `1px solid var(--border)`,
+                            borderRadius: 12,
+                            background: "var(--panel)",
+                            padding: "0.35rem 0.5rem",
+                            display: "flex",
+                            alignItems: "stretch",
+                            gap: 0,
+                            position: "relative"
+                          }}
+                        >
+                          <button
+                            type="button"
+                            onMouseDown={(event) =>
+                              handleConnectorMouseDown(event, {
+                                nodeId: node.id,
+                                sectionId: section.id,
+                                side: "left"
+                              })
+                            }
+                            onMouseUp={(event) => {
+                              event.preventDefault();
+                              event.stopPropagation();
+                              handleConnectorDrop({
+                                nodeId: node.id,
+                                sectionId: section.id,
+                                side: "left"
+                              });
+                            }}
+                            onDoubleClick={() => {
+                              handleDeleteLink({
+                                nodeId: node.id,
+                                sectionId: section.id,
+                                side: "left"
+                              });
+                            }}
+                            aria-label="左コネクタ"
+                            tabIndex={-1}
+                            aria-hidden="true"
+                            style={{
+                              width: 12,
+                              height: 12,
+                              borderRadius: "50%",
+                              border: isLeftActive ? `2px solid var(--accent)` : `1px solid var(--border)`,
+                              background: hasLeftConnection ? "var(--accent)" : isLeftActive ? "var(--accent-surface)" : "var(--panel-minor)",
+                              cursor: "default",
+                              flexShrink: 0,
+                              position: "absolute",
+                              left: -6,
+                              top: "50%",
+                              transform: "translateY(-50%)",
+                              padding: 0,
+                              outline: "none"
+                            }}
+                          />
+                          <textarea
+                            value={section.text}
+                            onFocus={() => {
+                              setSelectedNodeId(node.id);
+                              setSelectedSectionId(section.id);
+                            }}
+                            onContextMenu={(event) => {
+                              event.preventDefault();
+                              event.stopPropagation();
+                              setContextMenu({
+                                x: event.clientX,
+                                y: event.clientY,
+                                type: "section",
+                                nodeId: node.id,
+                                sectionId: section.id
+                              });
+                            }}
+                            onChange={(event) => handleSectionTextChange(node.id, section.id, event.target.value)}
+                            onBlur={() => setSelectedSectionId(null)}
+                            rows={getRowsForText(section.text)}
+                            style={{
+                              border: "none",
+                              borderRadius: 8,
+                              background: "var(--panel-minor)",
+                              color: "var(--fg)",
+                              resize: "none",
+                              fontSize: section.fontSize ?? 12,
+                              lineHeight: 1.2,
+                              padding: "0.15rem 0.45rem",
+                              flex: 1,
+                              outline: "none"
+                            }}
+                          />
+                          <button
+                            type="button"
+                            onMouseDown={(event) =>
+                              handleConnectorMouseDown(event, {
+                                nodeId: node.id,
+                                sectionId: section.id,
+                                side: "right"
+                              })
+                            }
+                            onMouseUp={(event) => {
+                              event.preventDefault();
+                              event.stopPropagation();
+                              handleConnectorDrop({
+                                nodeId: node.id,
+                                sectionId: section.id,
+                                side: "right"
+                              });
+                            }}
+                            onDoubleClick={() => {
+                              handleDeleteLink({
+                                nodeId: node.id,
+                                sectionId: section.id,
+                                side: "right"
+                              });
+                            }}
+                            aria-label="右コネクタ"
+                            tabIndex={-1}
+                            aria-hidden="true"
+                            style={{
+                              width: 12,
+                              height: 12,
+                              borderRadius: "50%",
+                              border: isRightActive ? `2px solid var(--accent)` : `1px solid var(--border)`,
+                              background: hasRightConnection ? "var(--accent)" : isRightActive ? "var(--accent-surface)" : "var(--panel-minor)",
+                              cursor: "default",
+                              flexShrink: 0,
+                              position: "absolute",
+                              right: -6,
+                              top: "50%",
+                              transform: "translateY(-50%)",
+                              padding: 0,
+                              outline: "none"
+                            }}
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+            {(page.textBoxes || []).map((textBox) => {
+              const isSelected = selectedTextBoxId === textBox.id;
+              const textBoxColor = textBox.color ?? DEFAULT_NODE_COLOR;
+              const isLinkingSource = linkingFrom?.textBoxId === textBox.id;
+              const hasConnection = page.links.some(
+                (link) =>
+                  (link.from.textBoxId === textBox.id) || (link.to.textBoxId === textBox.id)
+              );
+              return (
+                <div
+                  key={textBox.id}
+                  style={{
+                    position: "absolute",
+                    left: textBox.x,
+                    top: textBox.y,
+                    transform: "translateX(-50%)",
+                    width: "auto",
+                    minWidth: "80px",
+                    maxWidth: "300px",
+                    borderRadius: 12,
+                    border: isSelected ? `2px solid var(--accent)` : isLinkingSource ? `2px solid #60a5fa` : `1px solid var(--border)`,
+                    background: "var(--panel)",
+                    display: "flex",
+                    flexDirection: "column",
+                    overflow: "visible",
+                    zIndex: 10,
+                    transition: "box-shadow 0.2s ease",
+                    padding: "0.45rem"
+                  }}
+                  onMouseDown={(event) => {
+                    if (event.button === 0) {
+                      setSelectedTextBoxId(textBox.id);
+                      handleTextBoxDragStart(event, textBox);
+                    }
+                  }}
+                  onMouseUp={(event) => {
+                    if (linkingFrom) {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      handleConnectorDrop({
+                        textBoxId: textBox.id,
+                        side: "right"
+                      });
+                    }
+                  }}
+                  onContextMenu={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    setContextMenu({
+                      x: event.clientX,
+                      y: event.clientY,
+                      type: "textbox",
+                      textBoxId: textBox.id
+                    });
+                  }}
+                  aria-label="メモをドラッグ"
+                >
+                  {/* テキストコンテンツ */}
+                  <div
+                    style={{
+                      cursor: editingTextBoxId === textBox.id ? "text" : "grab",
+                      padding: "0.35rem 0.5rem",
+                      background: "var(--panel)",
+                      color: "inherit",
+                      fontSize: 12,
+                      fontWeight: 500,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      userSelect: "none",
+                      borderRadius: 12,
+                      transition: "none",
+                      gap: 6,
+                      minHeight: "30px",
+                      position: "relative"
+                    }}
+                  >
+                    {editingTextBoxId === textBox.id ? (
+                      <input
+                        ref={editingTextBoxRefRef as React.RefObject<HTMLInputElement>}
+                        type="text"
+                        autoFocus
+                        value={textBox.text}
+                        onChange={(event) => {
+                          handleSelectedTextBoxTextChange(event.target.value);
+                        }}
+                        onBlur={() => setEditingTextBoxId(null)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Escape") {
+                            setEditingTextBoxId(null);
+                            (event.target as HTMLInputElement).blur();
+                          } else if (event.key === "Enter") {
+                            event.preventDefault();
+                            setEditingTextBoxId(null);
+                            (event.target as HTMLInputElement).blur();
+                          }
+                        }}
+                        onClick={(event) => event.stopPropagation()}
+                        onMouseDown={(event) => event.stopPropagation()}
+                        style={{
+                          background: "transparent",
+                          border: "none",
+                          color: "inherit",
+                          fontSize: `${textBox.fontSize ?? 11}px`,
+                          fontWeight: 500,
+                          textAlign: "left",
+                          flex: 1,
+                          minWidth: 0,
+                          height: "32px",
+                          outline: "none",
+                          fontFamily: "inherit",
+                          padding: "0.25rem 0"
+                        }}
+                      />
+                    ) : (
+                      <span
+                        onDoubleClick={(event) => {
+                          event.stopPropagation();
+                          setEditingTextBoxId(textBox.id);
+                        }}
+                        style={{
+                          flex: 1,
+                          textAlign: "left",
+                          fontSize: `${textBox.fontSize ?? 11}px`,
+                          fontWeight: 500,
+                          cursor: "text",
+                          userSelect: "text",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                          minHeight: "32px",
+                          display: "flex",
+                          alignItems: "center",
+                          lineHeight: "1.4"
+                        }}
+                      >
+                        {textBox.text}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+        
+        {/* コンテキストメニュー */}
+        {contextMenu && (
+          <>
+            <div
+              style={{
+                position: "fixed",
+                inset: 0,
+                zIndex: 1000
+              }}
+              onMouseDown={() => setContextMenu(null)}
+            />
+            <div
+              style={{
+                position: "fixed",
+                left: contextMenu.x,
+                top: contextMenu.y,
+                zIndex: 1001,
+                background: "var(--panel)",
+                border: `1px solid var(--border)`,
+                borderRadius: 8,
+                overflow: "hidden",
+                boxShadow: "0 4px 12px rgba(0,0,0,0.15)"
+              }}
+            >
+              {contextMenu.type === "node" && (
+                <button
+                  onClick={() => {
+                    if (contextMenu.nodeId) {
+                      handleDeleteNode();
+                    }
+                    setContextMenu(null);
+                  }}
+                  style={{
+                    width: "100%",
+                    border: "none",
+                    background: "transparent",
+                    color: "inherit",
+                    padding: "0.5rem 1rem",
+                    cursor: "pointer",
+                    fontSize: 13,
+                    textAlign: "left",
+                    transition: "background 0.2s"
+                  }}
+                  onMouseEnter={(e) => {
+                    (e.target as HTMLButtonElement).style.background = "var(--panel-minor)";
+                  }}
+                  onMouseLeave={(e) => {
+                    (e.target as HTMLButtonElement).style.background = "transparent";
+                  }}
+                >
+                  パネルを削除
+                </button>
+              )}
+              {contextMenu.type === "section" && (
+                <button
+                  onClick={() => {
+                    if (contextMenu.nodeId && contextMenu.sectionId) {
+                      handleDeleteSection(contextMenu.nodeId, contextMenu.sectionId);
+                    }
+                    setContextMenu(null);
+                  }}
+                  style={{
+                    width: "100%",
+                    border: "none",
+                    background: "transparent",
+                    color: "inherit",
+                    padding: "0.5rem 1rem",
+                    cursor: "pointer",
+                    fontSize: 13,
+                    textAlign: "left",
+                    transition: "background 0.2s"
+                  }}
+                  onMouseEnter={(e) => {
+                    (e.target as HTMLButtonElement).style.background = "var(--panel-minor)";
+                  }}
+                  onMouseLeave={(e) => {
+                    (e.target as HTMLButtonElement).style.background = "transparent";
+                  }}
+                >
+                  アイテムを削除
+                </button>
+              )}
+              {contextMenu.type === "textbox" && (
+                <button
+                  onClick={() => {
+                    if (contextMenu.textBoxId) {
+                      setSelectedTextBoxId(contextMenu.textBoxId);
+                      handleDeleteTextBox();
+                    }
+                    setContextMenu(null);
+                  }}
+                  style={{
+                    width: "100%",
+                    border: "none",
+                    background: "transparent",
+                    color: "inherit",
+                    padding: "0.5rem 1rem",
+                    cursor: "pointer",
+                    fontSize: 13,
+                    textAlign: "left",
+                    transition: "background 0.2s"
+                  }}
+                  onMouseEnter={(e) => {
+                    (e.target as HTMLButtonElement).style.background = "var(--panel-minor)";
+                  }}
+                  onMouseLeave={(e) => {
+                    (e.target as HTMLButtonElement).style.background = "transparent";
+                  }}
+                >
+                  メモを削除
+                </button>
+              )}
+            </div>
+          </>
+        )}
+      </>
+    );
+  };
+
+  const renderQA = (page: QAPage) => {
+    const selectedCard = page.cards.find((card) => card.id === selectedQACardId) ?? page.cards[0] ?? null;
+    return (
+      <div style={{ display: "flex", gap: 16, flex: 1, minHeight: 0 }}>
+        <div
+          style={{
+            width: 320,
+            border: `1px solid var(--border)`,
+            borderRadius: 18,
+            background: "var(--panel-minor)",
+            padding: "1rem",
+            display: "flex",
+            flexDirection: "column",
+            gap: 12
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+            <strong style={{ fontSize: 14 }}>質問カード</strong>
+            <button
+              type="button"
+              onClick={handleAddQACard}
+              style={{
+                border: "none",
+                background: "var(--accent)",
+                color: "var(--accent-contrast)",
+                borderRadius: 999,
+                padding: "0.4rem 0.9rem",
+                cursor: "pointer",
+                fontSize: 12
+              }}
+            >
+              カード追加
+            </button>
+          </div>
+          <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 8 }}>
+            {page.cards.length === 0 ? (
+              <p style={{ opacity: 0.7 }}>まだカードがありません。追加して質問を書きましょう。</p>
+            ) : (
+              page.cards.map((card) => {
+                const isActive = card.id === selectedCard?.id;
+                return (
+                  <button
+                    key={card.id}
+                    type="button"
+                    onClick={() => setSelectedQACardId(card.id)}
+                    style={{
+                      borderRadius: 12,
+                      border: isActive ? `2px solid var(--accent)` : `1px solid var(--border)`,
+                      padding: "0.75rem",
+                      background: isActive ? "var(--panel-focus)" : "var(--panel)",
+                      color: "inherit",
+                      textAlign: "left",
+                      cursor: "pointer",
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 4
+                    }}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <strong style={{ fontSize: 14 }}>{card.title || "無題の質問"}</strong>
+                      <span style={{ fontSize: 11, opacity: 0.7 }}>{card.answers.length} 件の回答</span>
+                    </div>
+                    <p style={{ margin: 0, fontSize: 13, color: "var(--fg-muted)", whiteSpace: "normal", overflow: "hidden", textOverflow: "ellipsis" }}>
+                      {card.description || "質問の詳細を記入できます。"}
+                    </p>
+                  </button>
+                );
+              })
+            )}
+          </div>
+        </div>
+        <div
+          style={{
+            flex: 1,
+            border: `1px solid var(--border)`,
+            borderRadius: 18,
+            background: "var(--panel)",
+            padding: "1rem",
+            display: "flex",
+            flexDirection: "column",
+            gap: 12,
+            minHeight: 0
+          }}
+        >
+          {selectedCard ? (
+            <>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <label style={{ fontSize: 12, opacity: 0.7 }}>質問タイトル</label>
+                <input
+                  value={selectedCard.title}
+                  onChange={(event) => handleQACardFieldChange(selectedCard.id, "title", event.target.value)}
+                  style={{
+                    borderRadius: 10,
+                    border: `1px solid var(--border)`,
+                    padding: "0.45rem 0.6rem",
+                    fontSize: 15,
+                    background: "var(--panel-minor)",
+                    color: "inherit"
+                  }}
+                />
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <label style={{ fontSize: 12, opacity: 0.7 }}>詳細</label>
+                <textarea
+                  value={selectedCard.description}
+                  onChange={(event) => handleQACardFieldChange(selectedCard.id, "description", event.target.value)}
+                  rows={4}
+                  style={{
+                    borderRadius: 10,
+                    border: `1px solid var(--border)`,
+                    padding: "0.5rem 0.6rem",
+                    fontSize: 14,
+                    background: "var(--panel-minor)",
+                    color: "inherit",
+                    resize: "vertical",
+                    minHeight: 120
+                  }}
+                />
+              </div>
+              <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 8, minHeight: 0 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <strong style={{ fontSize: 14 }}>回答</strong>
+                  <span style={{ fontSize: 12, opacity: 0.7 }}>{selectedCard.answers.length} 件</span>
+                </div>
+                <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 8 }}>
+                  {selectedCard.answers.length === 0 ? (
+                    <p style={{ opacity: 0.6 }}>まだ回答がありません。誰かに答えてもらいましょう。</p>
+                  ) : (
+                    selectedCard.answers.map((answer) => (
+                      <article
+                        key={answer.id}
+                        style={{
+                          borderRadius: 12,
+                          border: `1px solid var(--border)`,
+                          background: "var(--panel-minor)",
+                          padding: "0.65rem",
+                          fontSize: 14,
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: 4
+                        }}
+                      >
+                        <p style={{ margin: 0, whiteSpace: "pre-wrap" }}>{answer.text}</p>
+                        <span style={{ fontSize: 11, opacity: 0.6 }}>{new Date(answer.createdAt).toLocaleString()}</span>
+                      </article>
+                    ))
+                  )}
+                </div>
+                <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+                  <textarea
+                    value={qaAnswerDraft}
+                    onChange={(event) => setQaAnswerDraft(event.target.value)}
+                    placeholder="回答を入力...（Shift+Enter で改行、投稿後も保存されます）"
+                    rows={3}
+                    style={{
+                      flex: 1,
+                      borderRadius: 10,
+                      border: `1px solid var(--border)`,
+                      padding: "0.5rem 0.6rem",
+                      fontSize: 14,
+                      background: "var(--panel-minor)",
+                      color: "inherit",
+                      resize: "vertical"
+                    }}
+                  />
+                  <button
+                    type="button"
+                    onClick={handleAddQAAnswer}
+                    disabled={!qaAnswerDraft.trim()}
+                    style={{
+                      borderRadius: 10,
+                      border: "none",
+                      background: qaAnswerDraft.trim() ? "var(--accent)" : "var(--panel)",
+                      color: qaAnswerDraft.trim() ? "var(--accent-contrast)" : "var(--fg)",
+                      padding: "0.6rem 0.9rem",
+                      cursor: qaAnswerDraft.trim() ? "pointer" : "not-allowed",
+                      fontWeight: 600
+                    }}
+                  >
+                    回答を追加
+                  </button>
+                </div>
+              </div>
+            </>
+          ) : (
+            <p style={{ opacity: 0.7 }}>カードを追加して質問と回答を整理しましょう。</p>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  const renderRanking = (page: RankingPage) => {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
+          <input
+            value={page.title}
+            onChange={(event) => handleTitleChange(event.target.value)}
+            placeholder="ページタイトル"
+            style={{
+              flex: 1,
+              minWidth: 220,
+              border: "none",
+              borderBottom: `1px solid var(--border)`,
+              background: "transparent",
+              color: "inherit",
+              fontSize: 20,
+              paddingBottom: 6
+            }}
+          />
+          <button
+            type="button"
+            onClick={handleRankingAddItem}
+            style={{
+              borderRadius: 999,
+              border: `1px dashed var(--border)`,
+              background: "var(--panel-minor)",
+              color: "inherit",
+              padding: "0.45rem 1rem",
+              cursor: "pointer",
+              fontSize: 13,
+              fontWeight: 600
+            }}
+          >
+            カードを先頭に追加
+          </button>
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {page.items.length === 0 && <p style={{ opacity: 0.7 }}>まだカードがありません。</p>}
+          {page.items.map((item, index) => {
+            const isTop = index === 0;
+            const isBottom = index === page.items.length - 1;
+            return (
+              <article
+                key={item.id}
+                onDragOver={(event) => handleRankingDragOver(item.id, event)}
+                onDrop={() => handleRankingDrop(item.id)}
+                style={{
+                  borderRadius: 16,
+                  border:
+                    dragOverRankingItemId === item.id
+                      ? `2px dashed var(--accent)`
+                      : isTop
+                      ? `2px solid var(--accent)`
+                      : `1px solid var(--border)`,
+                  background: "var(--panel-minor)",
+                  padding: "0.9rem",
+                  boxShadow: isTop ? "0 10px 25px var(--shadow-strong)" : "none",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 10
+                }}
+              >
+                <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                  <input
+                    value={item.title}
+                    onChange={(e) => handleRankingItemTitleChange(item.id, e.target.value)}
+                    placeholder={isTop ? "最優先" : `Priority ${index + 1}`}
+                    style={{
+                      flex: 1,
+                      minWidth: 160,
+                      border: "none",
+                      borderBottom: `1px solid var(--border)`,
+                      background: "transparent",
+                      color: "inherit",
+                      fontSize: 14,
+                      paddingBottom: 4
+                    }}
+                  />
+                  <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                    <div
+                      title="ドラッグして並べ替え"
+                      onDragStart={(e) => handleRankingDragStart(item.id, e)}
+                      draggable
+                      style={{
+                        width: 44,
+                        height: 32,
+                        borderRadius: 8,
+                        border: `1px solid var(--border)`,
+                        background: "var(--panel)",
+                        color: "inherit",
+                        cursor: "grab",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        userSelect: "none"
+                      }}
+                    >
+                      :::::
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleRankingMoveItem(item.id, "up")}
+                      disabled={isTop}
+                      style={{
+                        width: 32,
+                        height: 32,
+                        borderRadius: 8,
+                        border: `1px solid var(--border)`,
+                        background: "var(--panel)",
+                        color: "inherit",
+                        cursor: isTop ? "not-allowed" : "pointer",
+                        opacity: isTop ? 0.4 : 1
+                      }}
+                    >
+                      ↑
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleRankingMoveItem(item.id, "down")}
+                      disabled={isBottom}
+                      style={{
+                        width: 32,
+                        height: 32,
+                        borderRadius: 8,
+                        border: `1px solid var(--border)`,
+                        background: "var(--panel)",
+                        color: "inherit",
+                        cursor: isBottom ? "not-allowed" : "pointer",
+                        opacity: isBottom ? 0.4 : 1
+                      }}
+                    >
+                      ↓
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleRankingDeleteItem(item.id)}
+                      style={{
+                        width: 32,
+                        height: 32,
+                        borderRadius: 8,
+                        border: `1px solid var(--border)`,
+                        background: "var(--panel)",
+                        color: "inherit",
+                        cursor: "pointer"
+                      }}
+                    >
+                      ×
+                    </button>
+                  </div>
+                </header>
+                <textarea
+                  value={item.body}
+                  onChange={(event) => handleRankingItemBodyChange(item.id, event.target.value)}
+                  rows={4}
+                  style={{
+                    borderRadius: 12,
+                    border: `1px solid var(--border)`,
+                    background: "var(--panel)",
+                    color: "var(--fg)",
+                    padding: "0.6rem",
+                    fontSize: 14,
+                    lineHeight: 1.5,
+                    resize: "vertical"
+                  }}
+                />
+              </article>
+            );
+          })}
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <>
+      <div style={{ display: "flex", minHeight: "100vh" }}>
+        <aside
+          style={{
+            width: isBoardsOpen ? 260 : 50,
+            borderRight: `1px solid var(--border)`,
+            padding: "0.8rem",
+            display: "flex",
+            flexDirection: "column",
+            gap: "1rem",
+            background: "var(--panel-major)",
+            transition: "width 0.2s ease",
+            overflow: "visible"
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", justifyContent: isBoardsOpen ? "space-between" : "center" }}>
+          {isBoardsOpen && (
+            <img
+              src="/WhimsyBoard_LOG.png"
+              alt="WhimsyBoard"
+              style={{
+                height: 70,
+                width: "auto",
+                objectFit: "contain",
+                outline: "none"
+              }}
+            />
+          )}
+          <button
+            type="button"
+            onClick={() => setIsBoardsOpen(!isBoardsOpen)}
+            style={{
+              border: "none",
+              background: "transparent",
+              color: "inherit",
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              gap: 4,
+              fontSize: 14,
+              outline: "none",
+              padding: "0.4rem"
+            }}
+          >
+            {isBoardsOpen ? (
+              <>
+                <GoSidebarExpand size={18} aria-hidden="true" />
+                <span style={{ fontSize: 12 }}>閉じる</span>
+              </>
+            ) : (
+              <GoSidebarCollapse size={18} aria-hidden="true" />
+            )}
+          </button>
+        </div>
+        {isBoardsOpen && (
+          <>
+            <nav style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {boards.map((board) => {
+              const isActive = board.id === selectedBoardId;
+              return (
+                <button
+                  key={board.id}
+                  type="button"
+                  onClick={() => handleBoardSelect(board.id)}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    background: isActive ? "var(--accent-surface)" : "transparent",
+                    border: "none",
+                    color: "inherit",
+                    padding: "0.5rem 0.8rem",
+                    borderRadius: 10,
+                    cursor: "pointer",
+                    outline: "none"
+                  }}
+                >
+                  <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span>{board.icon}</span>
+                    <span>{board.name}</span>
+                  </span>
+                  <span
+                    style={{
+                      minWidth: 28,
+                      textAlign: "center",
+                      fontSize: 12,
+                      background: board.id === "qa" ? "#16a34a" : board.accent,
+                      color: "var(--accent-contrast)",
+                      borderRadius: 999,
+                      padding: "0.1rem 0.4rem"
+                    }}
+                  >
+                    {boardCounts[board.id] ?? 0}
+                  </span>
+                </button>
+              );
+            })}
+          </nav>
+          <div
+            aria-hidden="true"
+            style={{
+              borderTop: `2px solid var(--border)`,
+              margin: "0.75rem 0"
+            }}
+          />
+          <section
+            style={{
+              border: `1px solid var(--border)`,
+              borderRadius: 18,
+              padding: "0.9rem",
+              background: "var(--panel)",
+              display: "flex",
+              flexDirection: "column",
+              gap: "0.75rem"
+            }}
+          >
+            <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <strong style={{ fontSize: 14 }}>{boards.find((board) => board.id === selectedBoardId)?.name ?? ""}</strong>
+              <button
+                type="button"
+                onClick={handleAddPage}
+                style={{
+                  border: "none",
+                  background: "var(--accent)",
+                  color: "var(--accent-contrast)",
+                  borderRadius: 999,
+                  padding: "0.2rem 0.6rem",
+                  fontSize: 12,
+                  cursor: "pointer"
+                }}
+              >
+                新規
+              </button>
+            </header>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 380, overflowY: "auto" }}>
+              {pagesForBoard.length === 0 && <p style={{ opacity: 0.7 }}>このボードにページはありません。</p>}
+              {pagesForBoard.map((page) => {
+                const isCurrent = page.id === activePageId;
+                return (
+                  <article
+                    key={page.id}
+                    role="button"
+                    tabIndex={page.boardId === "ranking" ? -1 : 0}
+                    onClick={() => handlePageSelect(page.id)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        handlePageSelect(page.id);
+                      }
+                    }}
+                    style={{
+                      border: isCurrent ? `2px solid var(--accent)` : `1px solid var(--border)`,
+                      borderRadius: 12,
+                      padding: "0.75rem",
+                      background: isCurrent ? "var(--panel-focus)" : "var(--panel-minor)",
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 6,
+                      cursor: "pointer"
+                    }}
+                  >
+                    <strong>{page.title}</strong>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, opacity: 0.75 }}>
+                      <span>{boards.find((board) => board.id === page.boardId)?.name}</span>
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          handleDeletePage(page.id);
+                        }}
+                        style={{
+                          border: "none",
+                          background: "transparent",
+                          color: "inherit",
+                          cursor: "pointer"
+                        }}
+                      >
+                        削除
+                      </button>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          </section>
+          <div
+            aria-hidden="true"
+            style={{
+              borderTop: `2px solid var(--border)`,
+              margin: "0.75rem 0"
+            }}
+          />
+          <div
+            style={{
+              position: "relative",
+              marginTop: 8
+            }}
+          >
+            <button
+              type="button"
+              onClick={() => setIsProjectMenuOpen((prev) => !prev)}
+              aria-expanded={isProjectMenuOpen}
+              style={{
+                width: "100%",
+                borderRadius: 12,
+                border: `1px solid var(--border)`,
+                background: "var(--panel-minor)",
+                color: "inherit",
+                padding: "0.65rem 0.75rem",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                fontSize: 14,
+                fontWeight: 600,
+                cursor: "pointer",
+                outline: "none"
+              }}
+            >
+              <span>{activeProject?.name ?? "プロジェクトを選択"}</span>
+              <span aria-hidden="true" style={{ fontSize: 12 }}>
+                {isProjectMenuOpen ? "▾" : "▸"}
+              </span>
+            </button>
+          </div>
+          <div
+            aria-hidden="true"
+            style={{
+              borderTop: `2px solid var(--border)`,
+              margin: "0.75rem 0"
+            }}
+          />
+          <section
+            style={{
+              border: `1px solid var(--border)`,
+              borderRadius: 18,
+              padding: "0.9rem",
+              background: "var(--panel)",
+              display: "flex",
+              flexDirection: "column",
+              gap: "0.75rem"
+            }}
+          >
+            <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <FcSettings size={18} aria-hidden="true" />
+                <strong style={{ fontSize: 14 }}>設定</strong>
+              </div>
+            </header>
+            <button
+              type="button"
+              onClick={toggleTheme}
+              style={{
+                borderRadius: 10,
+                border: `1px solid var(--border)`,
+                background: "var(--panel-minor)",
+                color: "inherit",
+                padding: "0.5rem 0.8rem",
+                cursor: "pointer",
+                fontSize: 12,
+                textAlign: "left"
+              }}
+            >
+              {theme === "dark" ? "☀️ ライトモード" : "🌙 ダークモード"}
+            </button>
+            <button
+              type="button"
+              onClick={handleFirebaseAuthLogin}
+              style={{
+                borderRadius: 10,
+                border: `1px solid var(--border)`,
+                background: "var(--panel-minor)",
+                color: "inherit",
+                padding: "0.5rem 0.8rem",
+                cursor: "pointer",
+                fontSize: 12,
+                textAlign: "left"
+              }}
+            >
+              GoogleでFirebaseにサインイン
+            </button>
+            <button
+              type="button"
+              onClick={handleFirebaseCheck}
+              disabled={isCheckingFirebase}
+              style={{
+                borderRadius: 10,
+                border: `1px solid var(--border)`,
+                background: "var(--panel-minor)",
+                color: "inherit",
+                padding: "0.5rem 0.8rem",
+                cursor: isCheckingFirebase ? "not-allowed" : "pointer",
+                fontSize: 12,
+                textAlign: "left",
+                opacity: isCheckingFirebase ? 0.7 : 1
+              }}
+            >
+              {isCheckingFirebase ? "Firebase確認中..." : "Firebase接続確認"}
+            </button>
+            {firebaseStatus && (
+              <p style={{ margin: 0, fontSize: 12, color: "var(--fg-muted)" }}>{firebaseStatus}</p>
+            )}
+          </section>
+          <section
+            style={{
+              border: `1px solid var(--border)`,
+              borderRadius: 18,
+              padding: "0.9rem",
+              background: "var(--panel)",
+              display: "flex",
+              flexDirection: "column",
+              gap: "0.65rem"
+            }}
+          >
+            <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <FcLock size={18} aria-hidden="true" />
+                <strong style={{ fontSize: 14 }}>アカウント</strong>
+              </div>
+            </header>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 12
+              }}
+            >
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <span style={{ fontSize: 12, opacity: 0.75 }}>現在のアカウント</span>
+                <strong style={{ fontSize: 16 }}>
+                  {activeAccountLabel || "未ログイン"}
+                </strong>
+              </div>
+              <button
+                type="button"
+                onClick={
+                  isLoggedIn
+                    ? handleAccountLogout
+                    : () => {
+                        setAccountMessage("");
+                        setIsAccountModalOpen(true);
+                      }
+                }
+                style={{
+                  borderRadius: 10,
+                  border: `1px solid var(--border)`,
+                  background: "var(--panel-minor)",
+                  color: "inherit",
+                  padding: "0.45rem 0.9rem",
+                  cursor: "pointer",
+                  fontSize: 12,
+                  whiteSpace: "nowrap"
+                }}
+              >
+                {isLoggedIn ? "ログアウト" : "ログイン"}
+              </button>
+            </div>
+          </section>
+          </>
+        )}
+      </aside>
+      {isAccountModalOpen && (
+        <div
+          role="presentation"
+          onClick={handleAccountDialogClose}
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(15, 23, 42, 0.45)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 50,
+            padding: "1rem"
+          }}
+        >
+          <div
+            role="dialog"
+            aria-label="アカウントログイン"
+            onClick={(event) => event.stopPropagation()}
+            style={{
+              width: 420,
+              maxWidth: "calc(100vw - 2rem)",
+              borderRadius: 18,
+              padding: "1rem",
+              background: "var(--panel)",
+              border: `1px solid var(--border)`,
+              boxShadow: "0 25px 45px rgba(15,23,42,0.35)",
+              display: "flex",
+              flexDirection: "column",
+              gap: 12
+            }}
+          >
+            <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <strong style={{ fontSize: 14 }}>ログイン</strong>
+              <button
+                type="button"
+                onClick={handleAccountDialogClose}
+                style={{
+                  border: "none",
+                  background: "transparent",
+                  color: "inherit",
+                  fontSize: 18,
+                  lineHeight: 1,
+                  cursor: "pointer",
+                  padding: 0
+                }}
+                aria-label="ログインウィンドウを閉じる"
+              >
+                ×
+              </button>
+            </header>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12 }}>
+              <span style={{ opacity: 0.75 }}>現在のアカウント</span>
+              <div
+                style={{
+                  borderRadius: 10,
+                  border: `1px solid var(--border)`,
+                  padding: "0.5rem 0.75rem",
+                  background: "var(--panel-minor)",
+                  fontWeight: 600
+                }}
+              >
+                {activeAccountLabel || "未ログイン"}
+              </div>
+            </div>
+            <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12 }}>
+              <span style={{ opacity: 0.8 }}>アカウント名</span>
+              <input
+                value={accountNameInput}
+                onChange={(event) => {
+                  setAccountNameInput(event.target.value);
+                  setAccountMessage("");
+                }}
+                placeholder="your-name"
+                style={{
+                  borderRadius: 10,
+                  border: `1px solid var(--border)`,
+                  padding: "0.45rem 0.6rem",
+                  background: "var(--panel-minor)",
+                  color: "inherit"
+                }}
+              />
+            </label>
+            <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12 }}>
+              <span style={{ opacity: 0.8 }}>アカウントキー（任意）</span>
+              <input
+                value={accountKeyInput}
+                onChange={(event) => {
+                  setAccountKeyInput(event.target.value);
+                  setAccountMessage("");
+                }}
+                placeholder="空でもOK（ローカルのみ保存）"
+                style={{
+                  borderRadius: 10,
+                  border: `1px solid var(--border)`,
+                  padding: "0.45rem 0.6rem",
+                  background: "var(--panel-minor)",
+                  color: "inherit"
+                }}
+              />
+            </label>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button
+                type="button"
+                onClick={handleLocalAccountLogin}
+                style={{
+                  flex: 1,
+                  borderRadius: 10,
+                  border: `1px solid var(--border)`,
+                  background: "var(--panel-minor)",
+                  color: "inherit",
+                  padding: "0.5rem 0.8rem",
+                  cursor: "pointer",
+                  fontSize: 12,
+                  textAlign: "center"
+                }}
+              >
+                ログイン（ローカル）
+              </button>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 12 }}>
+              <span style={{ opacity: 0.8 }}>Google でログイン</span>
+              <button
+                type="button"
+                onClick={handleGoogleLogin}
+                style={{
+                  borderRadius: 10,
+                  border: `1px solid var(--border)`,
+                  background: "var(--panel-minor)",
+                  color: "inherit",
+                  padding: "0.5rem 0.8rem",
+                  cursor: "pointer",
+                  fontSize: 12,
+                  whiteSpace: "nowrap"
+                }}
+              >
+                Googleでログイン
+              </button>
+            </div>
+            {accountMessage && (
+              <p style={{ margin: 0, fontSize: 12, color: "var(--fg-muted)" }}>{accountMessage}</p>
+            )}
+          </div>
+        </div>
+      )}
+      {isProjectMenuOpen && (
+        <div
+          role="presentation"
+          onClick={() => setIsProjectMenuOpen(false)}
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(15, 23, 42, 0.45)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 40,
+            padding: "1rem"
+          }}
+        >
+          <div
+            ref={projectMenuRef}
+            role="dialog"
+            aria-label="プロジェクトメニュー"
+            onClick={(event) => event.stopPropagation()}
+            style={{
+              width: 340,
+              maxWidth: "calc(100vw - 2rem)",
+              borderRadius: 18,
+              padding: "1rem",
+              background: "var(--panel)",
+              border: `1px solid var(--border)`,
+              boxShadow: "0 25px 45px rgba(15,23,42,0.35)",
+              display: "flex",
+              flexDirection: "column",
+              gap: 12
+            }}
+          >
+            <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <strong style={{ fontSize: 14 }}>プロジェクト</strong>
+              <button
+                type="button"
+                onClick={() => setIsProjectMenuOpen(false)}
+                style={{
+                  border: "none",
+                  background: "transparent",
+                  color: "inherit",
+                  fontSize: 18,
+                  lineHeight: 1,
+                  cursor: "pointer",
+                  padding: 0
+                }}
+                aria-label="プロジェクトメニューを閉じる"
+              >
+                ×
+              </button>
+            </header>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <span style={{ fontSize: 12, color: "var(--fg-muted)" }}>現在のプロジェクト</span>
+              <div
+                style={{
+                  borderRadius: 10,
+                  border: `1px solid var(--border)`,
+                  padding: "0.4rem 0.75rem",
+                  background: "var(--panel-minor)",
+                  color: "inherit",
+                  fontWeight: 600
+                }}
+              >
+                {activeProject?.name ?? "未選択"}
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <input
+                  value={projectRenameDraft}
+                  onChange={(event) => setProjectRenameDraft(event.target.value)}
+                  placeholder="名前を変更"
+                  style={{
+                    flex: 1,
+                    borderRadius: 10,
+                    border: `1px solid var(--border)`,
+                    padding: "0.45rem 0.6rem",
+                    background: "var(--panel-minor)",
+                    color: "inherit"
+                  }}
+                />
+                <button
+                  type="button"
+                  onClick={handleRenameProject}
+                  disabled={
+                    !projectRenameDraft.trim() ||
+                    projectRenameDraft.trim() === (activeProject?.name ?? "")
+                  }
+                  style={{
+                    borderRadius: 10,
+                    border: "none",
+                    background:
+                      projectRenameDraft.trim() &&
+                      projectRenameDraft.trim() !== (activeProject?.name ?? "")
+                        ? "var(--accent)"
+                        : "var(--panel)",
+                    color:
+                      projectRenameDraft.trim() &&
+                      projectRenameDraft.trim() !== (activeProject?.name ?? "")
+                        ? "var(--accent-contrast)"
+                        : "var(--fg-muted)",
+                    cursor:
+                      projectRenameDraft.trim() &&
+                      projectRenameDraft.trim() !== (activeProject?.name ?? "")
+                        ? "pointer"
+                        : "not-allowed",
+                    padding: "0.45rem 0.65rem",
+                    fontSize: 12
+                  }}
+                >
+                  保存
+                </button>
+              </div>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <span style={{ fontSize: 12, color: "var(--fg-muted)" }}>プロジェクトを切り替え</span>
+              <div
+                style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 6,
+                  maxHeight: 160,
+                  overflowY: "auto"
+                }}
+              >
+                {projects.map((project) => {
+                  const isActive = project.id === activeProjectId;
+                  return (
+                    <button
+                      key={project.id}
+                      type="button"
+                      onClick={() => handleProjectSelect(project.id)}
+                      style={{
+                        borderRadius: 10,
+                        border: `1px solid ${isActive ? "var(--accent)" : "var(--border)"}`,
+                        background: isActive ? "var(--panel-focus)" : "transparent",
+                        padding: "0.5rem 0.75rem",
+                        textAlign: "left",
+                        color: "inherit",
+                        cursor: "pointer",
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        fontWeight: isActive ? 600 : 400
+                      }}
+                    >
+                      <span>{project.name}</span>
+                      {isActive && <span style={{ fontSize: 12 }}>✔</span>}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <input
+                value={newProjectName}
+                onChange={(event) => setNewProjectName(event.target.value)}
+                placeholder="新しいプロジェクトを追加"
+                style={{
+                  flex: 1,
+                  borderRadius: 10,
+                  border: `1px solid var(--border)`,
+                  padding: "0.45rem 0.6rem",
+                  background: "var(--panel-minor)",
+                  color: "inherit"
+                }}
+              />
+              <button
+                type="button"
+                onClick={handleAddProject}
+                disabled={!newProjectName.trim()}
+                style={{
+                  borderRadius: 10,
+                  border: "none",
+                  background: newProjectName.trim() ? "var(--accent)" : "var(--panel)",
+                  color: newProjectName.trim() ? "var(--accent-contrast)" : "var(--fg-muted)",
+                  cursor: newProjectName.trim() ? "pointer" : "not-allowed",
+                  padding: "0.45rem 0.7rem",
+                  fontSize: 12
+                }}
+              >
+                追加
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      <main style={{ flex: 1, padding: 0, minWidth: 0, height: "100vh" }}>
+        <section
+          style={{
+            flex: 1,
+            minWidth: 0,
+            border: "none",
+            borderRadius: 0,
+            padding: "0.75rem 1rem",
+            background: "var(--panel)",
+            display: "flex",
+            flexDirection: "column",
+            gap: "0.25rem",
+            height: "100%"
+          }}
+        >
+          {isMarkdownPage(activePage) && (
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", flex: 1, minHeight: 0, overflow: "hidden" }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", flex: "0 0 auto" }}>
+                <input
+                  value={activePage.title}
+                  onChange={(event) => handleTitleChange(event.target.value)}
+                  placeholder="ページタイトル"
+                  style={{
+                    background: "transparent",
+                    border: "none",
+                    borderBottom: `2px solid var(--border)`,
+                    fontSize: 24,
+                    fontWeight: 600,
+                    paddingBottom: 12,
+                    color: "inherit"
+                  }}
+                />
+              </div>
+              <textarea
+                value={activePage.content}
+                onChange={(event) => handleMarkdownChange(event.target.value)}
+                style={{
+                  flex: 1,
+                  minHeight: 0,
+                  background: "var(--panel-minor)",
+                  color: "var(--fg)",
+                  borderRadius: 16,
+                  border: `1px solid var(--border)`,
+                  padding: "1rem",
+                  fontSize: 14,
+                  lineHeight: 1.5,
+                  resize: "none"
+                }}
+              />
+              <div style={{ display: "flex", gap: 12, flexWrap: "wrap", flex: "0 0 auto" }}>
+                <button
+                  type="button"
+                  onClick={handleDownloadMarkdown}
+                  style={{
+                    background: "var(--accent)",
+                    color: "var(--accent-contrast)",
+                    border: "none",
+                    borderRadius: 999,
+                    padding: "0.6rem 1.2rem",
+                    cursor: "pointer",
+                    fontWeight: 600
+                  }}
+                >
+                  .md をダウンロード
+                </button>
+                <button
+                  type="button"
+                  onClick={handleOpenPreview}
+                  style={{
+                    background: "transparent",
+                    border: `1px dashed var(--border)`,
+                    borderRadius: 999,
+                    padding: "0.6rem 1.2rem",
+                    color: "inherit",
+                    cursor: "pointer"
+                  }}
+                >
+                  プレビュータブを開く
+                </button>
+              </div>
+            </div>
+          )}
+
+          {isMindmapPage(activePage) && renderMindmap(activePage)}
+
+          {isQAPage(activePage) && renderQA(activePage)}
+
+          {isRankingPage(activePage) && renderRanking(activePage)}
+
+          {!activePage && <p style={{ opacity: 0.7 }}>このボードにページがありません。</p>}
+        </section>
+      </main>
+    </div>
+    </>
+  );
+}
