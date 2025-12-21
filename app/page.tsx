@@ -4057,7 +4057,6 @@ export default function HomePage() {
               {/* useEffect(() => {}, [projects, firebaseUser, currentOwnerId]); */}
               {/* useEffect(() => {}, [pages, firebaseUser, currentOwnerId]); */}
               {/* useEffect(() => {}, [projects, pages, activeProjectId, activePageId, firebaseUser, localAccount, persistLocalData]); */}
-            )}
             <div
               style={{
                 display: "flex",
