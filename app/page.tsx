@@ -693,20 +693,9 @@ export default function HomePage() {
         const projectsSnap = await getDocs(query(collection(db, "projects"), where("owner", "==", currentOwnerId)));
         const loadedProjects: Project[] = projectsSnap.docs.map((docSnap) => {
           const data = docSnap.data();
-          return (
-            <div className={styles.container}>
-              {/* 画面上部に保存ボタンを追加 */}
-              <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '8px 0' }}>
-                <button
-                  onClick={handleManualSave}
-                  disabled={isDataSyncing || !currentOwnerId}
-                  style={{ padding: '6px 18px', fontWeight: 'bold', background: '#1976d2', color: '#fff', border: 'none', borderRadius: 4, cursor: isDataSyncing || !currentOwnerId ? 'not-allowed' : 'pointer' }}
-                >
-                  保存
-                </button>
-                {isDataSyncing && <span style={{ color: '#1976d2' }}>保存中...</span>}
-              </div>
-              {/* ...既存のUI... */}
+          return {
+            id: docSnap.id,
+            name: typeof data.name === "string" ? data.name : "無題プロジェクト",
             owner: typeof data.owner === "string" ? data.owner : currentOwnerId,
             version: typeof data.version === "number" ? data.version : 0,
             updatedAt: typeof data.updatedAt === "string" ? data.updatedAt : undefined
