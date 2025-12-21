@@ -693,9 +693,20 @@ export default function HomePage() {
         const projectsSnap = await getDocs(query(collection(db, "projects"), where("owner", "==", currentOwnerId)));
         const loadedProjects: Project[] = projectsSnap.docs.map((docSnap) => {
           const data = docSnap.data();
-          return {
-            id: docSnap.id,
-            name: typeof data.name === "string" ? data.name : "無題プロジェクト",
+          return (
+            <div className={styles.container}>
+              {/* 画面上部に保存ボタンを追加 */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '8px 0' }}>
+                <button
+                  onClick={handleManualSave}
+                  disabled={isDataSyncing || !currentOwnerId}
+                  style={{ padding: '6px 18px', fontWeight: 'bold', background: '#1976d2', color: '#fff', border: 'none', borderRadius: 4, cursor: isDataSyncing || !currentOwnerId ? 'not-allowed' : 'pointer' }}
+                >
+                  保存
+                </button>
+                {isDataSyncing && <span style={{ color: '#1976d2' }}>保存中...</span>}
+              </div>
+              {/* ...既存のUI... */}
             owner: typeof data.owner === "string" ? data.owner : currentOwnerId,
             version: typeof data.version === "number" ? data.version : 0,
             updatedAt: typeof data.updatedAt === "string" ? data.updatedAt : undefined
@@ -842,8 +853,27 @@ export default function HomePage() {
       const pagesSnap = await getDocs(query(collection(db, "pages"), where("owner", "==", currentOwnerId)));
       const remotePages = pagesSnap.docs.map((docSnap) => ({ ...docSnap.data(), id: docSnap.id } as Page));
 
-      // 差分比較（例: 新規追加分は両方残す）
-      // ここでは単純なIDベースのマージ例
+      // 競合検出: 既存IDでversionが異なるものを検出
+      const conflictedProject = projects.find(lp => {
+        const remote = remoteProjects.find(rp => rp.id === lp.id);
+        return remote && remote.version !== lp.version;
+      });
+      if (conflictedProject) {
+        await handleVersionConflict("project", conflictedProject.id, conflictedProject);
+        setIsDataSyncing(false);
+        return;
+      }
+      const conflictedPage = pages.find(lp => {
+        const remote = remotePages.find(rp => rp.id === lp.id);
+        return remote && remote.version !== lp.version;
+      });
+      if (conflictedPage) {
+        await handleVersionConflict("page", conflictedPage.id, conflictedPage);
+        setIsDataSyncing(false);
+        return;
+      }
+
+      // 差分比較（新規追加分は両方残す）
       const mergedProjects = [
         ...remoteProjects,
         ...projects.filter(lp => !remoteProjects.some(rp => rp.id === lp.id))
@@ -853,8 +883,6 @@ export default function HomePage() {
         ...pages.filter(lp => !remotePages.some(rp => rp.id === lp.id))
       ];
 
-      // 競合（同じIDで内容が異なる場合）は今後UIで選択できるようにする
-      // 今回は新規追加分だけマージし、既存IDはリモート優先
       await Promise.all([
         ...projects.filter(lp => !remoteProjects.some(rp => rp.id === lp.id)).map(p => setDoc(doc(db, "projects", p.id), p)),
         ...pages.filter(lp => !remotePages.some(rp => rp.id === lp.id)).map(p => setDoc(doc(db, "pages", p.id), p)),
@@ -868,7 +896,7 @@ export default function HomePage() {
     } finally {
       setIsDataSyncing(false);
     }
-  }, [currentOwnerId, projects, pages]);
+  }, [currentOwnerId, projects, pages, handleVersionConflict]);
   // UI: 保存ボタンを追加
   // ...既存のreturn内の適切な場所に以下を追加してください...
   // <button onClick={handleManualSave} disabled={isDataSyncing || !currentOwnerId}>保存</button>
@@ -1072,20 +1100,42 @@ export default function HomePage() {
         acc[board.id] = pages.filter(
           (page) => page.boardId === board.id && page.projectId === activeProjectId
         ).length;
-        return acc;
-      },
-      { proposal: 0, mindmap: 0, ranking: 0, qa: 0 }
-    );
-  }, [pages, activeProjectId]);
-
-  // 選択状態を同期：パネルまたはメモのいずれか一方のみを選択
-  useEffect(() => {
-    if (selectedNodeId && selectedTextBoxId) {
-      setSelectedTextBoxId(null);
-    }
-  }, [selectedNodeId, selectedTextBoxId]);
-
-  // メモのtextarea高さ自動調整
+        return (
+          <div className={styles.container}>
+            {/* 画面上部に保存ボタンを追加 */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '8px 0' }}>
+              <button
+                onClick={handleManualSave}
+                disabled={isDataSyncing || !currentOwnerId}
+                style={{ padding: '6px 18px', fontWeight: 'bold', background: '#1976d2', color: '#fff', border: 'none', borderRadius: 4, cursor: isDataSyncing || !currentOwnerId ? 'not-allowed' : 'pointer' }}
+              >
+                保存
+              </button>
+              {isDataSyncing && <span style={{ color: '#1976d2' }}>保存中...</span>}
+            </div>
+            {/* 競合検出UI: pendingConflictがあれば表示 */}
+            {pendingConflict && (
+              <div style={{ background: '#fffbe6', border: '1px solid #ffe58f', padding: 16, margin: '12px 0', borderRadius: 6 }}>
+                <div style={{ fontWeight: 'bold', marginBottom: 8 }}>競合が発生しました</div>
+                <div style={{ marginBottom: 8 }}>
+                  他の人が同じデータを編集・保存したため、内容が競合しています。<br />
+                  どちらの内容を採用するか選択してください。
+                </div>
+                <div style={{ display: 'flex', gap: 16 }}>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontWeight: 'bold', marginBottom: 4 }}>あなたの編集内容</div>
+                    <pre style={{ background: '#f5f5f5', padding: 8, borderRadius: 4, maxHeight: 180, overflow: 'auto' }}>{JSON.stringify(pendingConflict.local, null, 2)}</pre>
+                    <button style={{ marginTop: 8, background: '#1976d2', color: '#fff', border: 'none', borderRadius: 4, padding: '4px 12px' }} onClick={resolveConflictWithLocal}>自分の内容で上書き</button>
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontWeight: 'bold', marginBottom: 4 }}>他の人の内容（最新）</div>
+                    <pre style={{ background: '#f5f5f5', padding: 8, borderRadius: 4, maxHeight: 180, overflow: 'auto' }}>{JSON.stringify(pendingConflict.remote, null, 2)}</pre>
+                    <button style={{ marginTop: 8, background: '#888', color: '#fff', border: 'none', borderRadius: 4, padding: '4px 12px' }} onClick={resolveConflictWithRemote}>他の人の内容を採用</button>
+                  </div>
+                </div>
+              </div>
+            )}
+            {/* ...既存のUI... */}
   useEffect(() => {
     if (editingTextBoxRefRef.current) {
       editingTextBoxRefRef.current.style.height = "auto";
