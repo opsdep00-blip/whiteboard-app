@@ -1312,18 +1312,16 @@ export default function HomePage() {
     merged.version = (remote as any).version;
     merged.updatedAt = nowIso();
     try {
+      let saved: Project | Page | null = null;
       if (kind === "project") {
         await persistProjectWithVersion(merged, currentOwnerId);
+        saved = await fetchRemoteProject(merged.id);
+        setProjects((prev) => prev.map((p) => p.id === merged.id && saved ? saved : p));
       } else {
         await persistPageWithVersion(merged, currentOwnerId);
+        saved = await fetchRemotePage(merged.id);
+        setPages((prev) => prev.map((p) => p.id === merged.id && saved ? saved : p));
       }
-      // Firestoreから最新データを再取得して同期
-      const updatedProjectsSnap = await getDocs(query(collection(db, "projects"), where("owner", "==", currentOwnerId)));
-      const updatedProjects = updatedProjectsSnap.docs.map((docSnap) => ({ ...docSnap.data(), id: docSnap.id } as Project));
-      const updatedPagesSnap = await getDocs(query(collection(db, "pages"), where("owner", "==", currentOwnerId)));
-      const updatedPages = updatedPagesSnap.docs.map((docSnap) => ({ ...docSnap.data(), id: docSnap.id } as Page));
-      setProjects(updatedProjects);
-      setPages(updatedPages);
       setPendingConflict(null);
       setDataMessage("両方の内容をマージして保存しました");
     } catch (error) {
@@ -1346,11 +1344,18 @@ export default function HomePage() {
         const next = { ...local, version: remoteVersion, updatedAt: nowIso() } as Page;
         await persistPageWithVersion(next, currentOwnerId);
       }
-      // Firestoreから最新データを再取得して同期
+      // Firestoreから最新データを再取得し、競合IDはlocalで上書き
       const updatedProjectsSnap = await getDocs(query(collection(db, "projects"), where("owner", "==", currentOwnerId)));
-      const updatedProjects = updatedProjectsSnap.docs.map((docSnap) => ({ ...docSnap.data(), id: docSnap.id } as Project));
+      let updatedProjects = updatedProjectsSnap.docs.map((docSnap) => ({ ...docSnap.data(), id: docSnap.id } as Project));
       const updatedPagesSnap = await getDocs(query(collection(db, "pages"), where("owner", "==", currentOwnerId)));
-      const updatedPages = updatedPagesSnap.docs.map((docSnap) => ({ ...docSnap.data(), id: docSnap.id } as Page));
+      let updatedPages = updatedPagesSnap.docs.map((docSnap) => ({ ...docSnap.data(), id: docSnap.id } as Page));
+      if (pendingConflict.kind === "project") {
+        const local = pendingConflict.local as Project;
+        updatedProjects = updatedProjects.map(p => p.id === local.id ? { ...local, version: p.version, updatedAt: p.updatedAt } : p);
+      } else {
+        const local = pendingConflict.local as Page;
+        updatedPages = updatedPages.map(p => p.id === local.id ? { ...local, version: p.version, updatedAt: p.updatedAt } : p);
+      }
       setProjects(updatedProjects);
       setPages(updatedPages);
       setPendingConflict(null);
