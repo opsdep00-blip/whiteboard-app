@@ -4024,8 +4024,28 @@ export default function HomePage() {
               {isDataSyncing && <span style={{ color: '#1976d2' }}>保存中...</span>}
             </div>
             {pendingConflict && (
-                <div style={{ background: '#fffbe6', border: '1px solid #ffe58f', padding: 16, margin: '12px 0', borderRadius: 6 }}>
-                  <div style={{ fontWeight: 'bold', marginBottom: 8 }}>競合が発生しました</div>
+              <div style={{
+                position: 'fixed',
+                inset: 0,
+                background: 'rgba(15, 23, 42, 0.45)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                zIndex: 1000
+              }}>
+                <div style={{
+                  minWidth: 420,
+                  maxWidth: '90vw',
+                  borderRadius: 18,
+                  padding: '2rem',
+                  background: '#fff',
+                  border: '1px solid #ffe58f',
+                  boxShadow: '0 25px 45px rgba(15,23,42,0.35)',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 18
+                }}>
+                  <div style={{ fontWeight: 'bold', fontSize: 18, marginBottom: 8 }}>競合が発生しました</div>
                   <div style={{ marginBottom: 8 }}>
                     他の人が同じデータを編集・保存したため、内容が競合しています。どちらか、または両方マージして保存できます。
                   </div>
@@ -4053,7 +4073,8 @@ export default function HomePage() {
                     <button style={{ background: '#22c55e', color: '#fff', border: 'none', borderRadius: 4, padding: '6px 24px', fontWeight: 'bold', fontSize: 16 }} onClick={resolveConflictWithMerge}>両方マージして保存</button>
                   </div>
                 </div>
-              )}
+              </div>
+            )}
               {/* useEffect(() => {}, [projects, firebaseUser, currentOwnerId]); */}
               {/* useEffect(() => {}, [pages, firebaseUser, currentOwnerId]); */}
               {/* useEffect(() => {}, [projects, pages, activeProjectId, activePageId, firebaseUser, localAccount, persistLocalData]); */}
