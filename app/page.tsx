@@ -703,8 +703,8 @@ export default function HomePage() {
         });
 
         const nextProjects = loadedProjects.length > 0
-          ? loadedProjects
-          : [{ id: DEFAULT_PROJECT_ID, name: "プロジェクトA", owner: currentOwnerId }];
+          ? loadedProjects.map(p => ({ ...p, owner: p.owner ?? undefined }))
+          : [{ id: DEFAULT_PROJECT_ID, name: "プロジェクトA", owner: currentOwnerId ?? undefined }];
         if (loadedProjects.length === 0) {
           await Promise.all(
             nextProjects.map((project) => setDoc(doc(db, "projects", project.id), project))
