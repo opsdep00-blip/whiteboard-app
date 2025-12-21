@@ -681,9 +681,7 @@ export default function HomePage() {
   useEffect(() => {
     const loadFromFirestore = async () => {
       if (!currentOwnerId) {
-        if (!localAccount) {
-          resetToLocalDefaults();
-        }
+        resetToLocalDefaults();
         return;
       }
       setIsDataSyncing(true);
@@ -747,7 +745,7 @@ export default function HomePage() {
     };
 
     void loadFromFirestore();
-  }, [firebaseUser, currentOwnerId, localAccount, resetToLocalDefaults]);
+  }, [firebaseUser, currentOwnerId, resetToLocalDefaults]);
 
   // 未ログイン時のみlocalStorageから復元
   useEffect(() => {
