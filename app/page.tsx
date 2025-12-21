@@ -1314,7 +1314,6 @@ export default function HomePage() {
       setDataMessage("両方の内容を別ページとして保存しました");
       return;
     }
-    }
     let merged: any = {};
     if (kind === "project") {
       merged = { ...remote, ...local };
