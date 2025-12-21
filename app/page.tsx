@@ -456,7 +456,17 @@ export default function HomePage() {
     return null;
   }, [firebaseUser?.displayName, firebaseUser?.email, localAccount?.name]);
   const isLoggedIn = !!firebaseUser || !!localAccount;
-  const currentOwnerId = useMemo(() => firebaseUser?.uid ?? null, [firebaseUser?.uid]);
+  // Googleアカウントならuid、ローカルアカウントならname+keyのハッシュ
+  const getLocalAccountOwnerId = (account: LocalAccount | null) => {
+    if (!account) return null;
+    // シンプルなハッシュ（本番はより安全な方法を推奨）
+    return `local_${btoa(encodeURIComponent(account.name + ':' + account.key))}`;
+  };
+  const currentOwnerId = useMemo(() => {
+    if (firebaseUser?.uid) return firebaseUser.uid;
+    if (localAccount) return getLocalAccountOwnerId(localAccount);
+    return null;
+  }, [firebaseUser?.uid, localAccount]);
   const lastPersistedProjectsRef = useRef<Project[]>(initialProjects);
   const lastPersistedPagesRef = useRef<Page[]>(INITIAL_PAGES_FOR_DEFAULT_PROJECT);
   const persistLocalData = useCallback(() => {
@@ -1173,15 +1183,15 @@ export default function HomePage() {
       });
       return;
     }
-    Promise.resolve(flushPersist()).finally(() => {
-      setLocalAccount(null);
-      setActiveAccountId(null);
-      setAccountMessage("ログアウトしました");
-      resetToLocalDefaults();
-      setIsAccountModalOpen(false);
-      setPendingConflict(null);
-    });
-  }, [firebaseUser, flushPersist, resetToLocalDefaults]);
+    // ローカルアカウントのみローカル保存、Firestoreには保存しない
+    persistLocalData();
+    setLocalAccount(null);
+    setActiveAccountId(null);
+    setAccountMessage("ログアウトしました");
+    resetToLocalDefaults();
+    setIsAccountModalOpen(false);
+    setPendingConflict(null);
+  }, [firebaseUser, persistLocalData, resetToLocalDefaults]);
 
   const handleGoogleLogin = useCallback(async () => {
     if (isAuthSigningIn) return;
