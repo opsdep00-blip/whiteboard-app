@@ -1,21 +1,23 @@
-  // 差分が大きい場合は新規ページとして追加する
-  function isLargeDifference(local: any, remote: any): boolean {
-    if (!local || !remote) return false;
-    if (local.title !== remote.title) return true;
-    if ((local.body || "") !== (remote.body || "")) return true;
-    const arrFields = ["cards", "items", "nodes", "textBoxes"];
-    for (const key of arrFields) {
-      const lArr = local[key] || [];
-      const rArr = remote[key] || [];
-      if (Math.abs(lArr.length - rArr.length) > 2) return true;
-      const lIds = lArr.map((x: any) => x.id);
-      const rIds = rArr.map((x: any) => x.id);
-      const diff = lIds.filter((id: any) => !rIds.includes(id)).length + rIds.filter((id: any) => !lIds.includes(id)).length;
-      if (diff > 2) return true;
-    }
-    return false;
-  }
+
 "use client";
+
+// 差分が大きい場合は新規ページとして追加する
+function isLargeDifference(local: any, remote: any): boolean {
+  if (!local || !remote) return false;
+  if (local.title !== remote.title) return true;
+  if ((local.body || "") !== (remote.body || "")) return true;
+  const arrFields = ["cards", "items", "nodes", "textBoxes"];
+  for (const key of arrFields) {
+    const lArr = local[key] || [];
+    const rArr = remote[key] || [];
+    if (Math.abs(lArr.length - rArr.length) > 2) return true;
+    const lIds = lArr.map((x: any) => x.id);
+    const rIds = rArr.map((x: any) => x.id);
+    const diff = lIds.filter((id: any) => !rIds.includes(id)).length + rIds.filter((id: any) => !lIds.includes(id)).length;
+    if (diff > 2) return true;
+  }
+  return false;
+}
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
