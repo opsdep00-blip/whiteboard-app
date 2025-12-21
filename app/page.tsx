@@ -1316,11 +1316,11 @@ export default function HomePage() {
       if (kind === "project") {
         await persistProjectWithVersion(merged, currentOwnerId);
         saved = await fetchRemoteProject(merged.id);
-        setProjects((prev) => prev.map((p) => p.id === merged.id && saved ? saved : p));
+        setProjects((prev) => prev.map((p) => p.id === merged.id && saved && "name" in saved ? saved as Project : p));
       } else {
         await persistPageWithVersion(merged, currentOwnerId);
         saved = await fetchRemotePage(merged.id);
-        setPages((prev) => prev.map((p) => p.id === merged.id && saved ? saved : p));
+        setPages((prev) => prev.map((p) => p.id === merged.id && saved && "title" in saved ? saved as Page : p));
       }
       setPendingConflict(null);
       setDataMessage("両方の内容をマージして保存しました");
