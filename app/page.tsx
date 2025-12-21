@@ -3948,6 +3948,38 @@ export default function HomePage() {
                 <strong style={{ fontSize: 14 }}>アカウント</strong>
               </div>
             </header>
+            {/* アカウントカード下に保存ボタンと競合UI */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '8px 0' }}>
+              <button
+                onClick={handleManualSave}
+                disabled={isDataSyncing || !currentOwnerId}
+                style={{ padding: '6px 18px', fontWeight: 'bold', background: '#1976d2', color: '#fff', border: 'none', borderRadius: 4, cursor: isDataSyncing || !currentOwnerId ? 'not-allowed' : 'pointer' }}
+              >
+                保存
+              </button>
+              {isDataSyncing && <span style={{ color: '#1976d2' }}>保存中...</span>}
+            </div>
+            {pendingConflict && (
+              <div style={{ background: '#fffbe6', border: '1px solid #ffe58f', padding: 16, margin: '12px 0', borderRadius: 6 }}>
+                <div style={{ fontWeight: 'bold', marginBottom: 8 }}>競合が発生しました</div>
+                <div style={{ marginBottom: 8 }}>
+                  他の人が同じデータを編集・保存したため、内容が競合しています。<br />
+                  どちらの内容を採用するか選択してください。
+                </div>
+                <div style={{ display: 'flex', gap: 16 }}>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontWeight: 'bold', marginBottom: 4 }}>あなたの編集内容</div>
+                    <pre style={{ background: '#f5f5f5', padding: 8, borderRadius: 4, maxHeight: 180, overflow: 'auto' }}>{JSON.stringify(pendingConflict.local, null, 2)}</pre>
+                    <button style={{ marginTop: 8, background: '#1976d2', color: '#fff', border: 'none', borderRadius: 4, padding: '4px 12px' }} onClick={resolveConflictWithLocal}>自分の内容で上書き</button>
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontWeight: 'bold', marginBottom: 4 }}>他の人の内容（最新）</div>
+                    <pre style={{ background: '#f5f5f5', padding: 8, borderRadius: 4, maxHeight: 180, overflow: 'auto' }}>{JSON.stringify(pendingConflict.remote, null, 2)}</pre>
+                    <button style={{ marginTop: 8, background: '#888', color: '#fff', border: 'none', borderRadius: 4, padding: '4px 12px' }} onClick={resolveConflictWithRemote}>他の人の内容を採用</button>
+                  </div>
+                </div>
+              </div>
+            )}
             <div
               style={{
                 display: "flex",
