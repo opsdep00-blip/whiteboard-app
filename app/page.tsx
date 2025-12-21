@@ -1,3 +1,20 @@
+  // 差分が大きい場合は新規ページとして追加する
+  function isLargeDifference(local: any, remote: any): boolean {
+    if (!local || !remote) return false;
+    if (local.title !== remote.title) return true;
+    if ((local.body || "") !== (remote.body || "")) return true;
+    const arrFields = ["cards", "items", "nodes", "textBoxes"];
+    for (const key of arrFields) {
+      const lArr = local[key] || [];
+      const rArr = remote[key] || [];
+      if (Math.abs(lArr.length - rArr.length) > 2) return true;
+      const lIds = lArr.map((x: any) => x.id);
+      const rIds = rArr.map((x: any) => x.id);
+      const diff = lIds.filter((id: any) => !rIds.includes(id)).length + rIds.filter((id: any) => !lIds.includes(id)).length;
+      if (diff > 2) return true;
+    }
+    return false;
+  }
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -1258,8 +1275,17 @@ export default function HomePage() {
       lastPersistedProjectsRef.current = lastPersistedProjectsRef.current.map((p) => (p.id === remote.id ? remote : p));
     } else {
       const remote = pendingConflict.remote as Page;
-      setPages((prev) => prev.map((p) => (p.id === remote.id ? remote : p)));
-      lastPersistedPagesRef.current = lastPersistedPagesRef.current.map((p) => (p.id === remote.id ? remote : p));
+      const local = pendingConflict.local as Page;
+      if (isLargeDifference(local, remote)) {
+        // 新規ページとして追加
+        const newId = remote.id + "_copy_" + Date.now();
+        const newPage = { ...remote, id: newId, title: (remote.title || "") + " (コピー)" };
+        setPages((prev) => [...prev, newPage]);
+        lastPersistedPagesRef.current = [...lastPersistedPagesRef.current, newPage];
+      } else {
+        setPages((prev) => prev.map((p) => (p.id === remote.id ? remote : p)));
+        lastPersistedPagesRef.current = lastPersistedPagesRef.current.map((p) => (p.id === remote.id ? remote : p));
+      }
     }
     setPendingConflict(null);
     setDataMessage("リモートの内容を採用しました");
@@ -1269,23 +1295,37 @@ export default function HomePage() {
   const resolveConflictWithMerge = useCallback(async () => {
     if (!pendingConflict || !currentOwnerId) return;
     const { kind, local, remote } = pendingConflict;
+    // 差分が大きい場合は新規ページとして両方残す
+    if (kind === "page" && isLargeDifference(local, remote)) {
+      const newId = local.id + "_copy_" + Date.now();
+      const newPage = { ...local, id: newId, title: (local.title || "") + " (コピー)" };
+      await persistPageWithVersion(newPage, currentOwnerId);
+      setPages((prev) => [...prev, newPage]);
+      // 既存ページはリモートで上書き
+      await persistPageWithVersion(remote, currentOwnerId);
+      setPages((prev) => prev.map((p) => p.id === remote.id ? remote : p));
+      setPendingConflict(null);
+      setDataMessage("大きな差分があったため両方のバージョンを残しました");
+      return;
+    }
     let merged: any = {};
     if (kind === "project") {
-      // projectは基本的にlocal優先
       merged = { ...remote, ...local };
     } else if (kind === "page") {
       const base = { ...remote, ...local };
       if ((base as any).boardId === "qa") {
         const localCards = (local as any).cards || [];
         const remoteCards = (remote as any).cards || [];
-        const allCards = [...localCards, ...remoteCards];
-        const mergedCards = Array.from(new Map(allCards.map(card => [card.id, card])).values());
-        mergedCards.forEach((card, idx) => {
+        const localIds = localCards.map((c: any) => c.id);
+        const remoteOnly = remoteCards.filter((c: any) => !localIds.includes(c.id));
+        const mergedCards = [...localCards, ...remoteOnly];
+        mergedCards.forEach((card: any, idx: number) => {
           const localCard = localCards.find((c: any) => c.id === card.id);
           const remoteCard = remoteCards.find((c: any) => c.id === card.id);
           if (localCard && remoteCard) {
-            const allAnswers = [...(localCard.answers || []), ...(remoteCard.answers || [])];
-            mergedCards[idx].answers = Array.from(new Map(allAnswers.map(ans => [ans.id, ans])).values());
+            const localAnsIds = (localCard.answers || []).map((a: any) => a.id);
+            const remoteAnsOnly = (remoteCard.answers || []).filter((a: any) => !localAnsIds.includes(a.id));
+            mergedCards[idx].answers = [...(localCard.answers || []), ...remoteAnsOnly];
           }
         });
         (base as any).cards = mergedCards;
@@ -1293,22 +1333,24 @@ export default function HomePage() {
       if ((base as any).boardId === "ranking") {
         const localItems = (local as any).items || [];
         const remoteItems = (remote as any).items || [];
-        const allItems = [...localItems, ...remoteItems];
-        (base as any).items = Array.from(new Map(allItems.map(item => [item.id, item])).values());
+        const localIds = localItems.map((i: any) => i.id);
+        const remoteOnly = remoteItems.filter((i: any) => !localIds.includes(i.id));
+        (base as any).items = [...localItems, ...remoteOnly];
       }
       if ((base as any).boardId === "mindmap") {
         const localNodes = (local as any).nodes || [];
         const remoteNodes = (remote as any).nodes || [];
-        const allNodes = [...localNodes, ...remoteNodes];
-        (base as any).nodes = Array.from(new Map(allNodes.map(node => [node.id, node])).values());
+        const localNodeIds = localNodes.map((n: any) => n.id);
+        const remoteNodeOnly = remoteNodes.filter((n: any) => !localNodeIds.includes(n.id));
+        (base as any).nodes = [...localNodes, ...remoteNodeOnly];
         const localTextBoxes = (local as any).textBoxes || [];
         const remoteTextBoxes = (remote as any).textBoxes || [];
-        const allTextBoxes = [...localTextBoxes, ...remoteTextBoxes];
-        (base as any).textBoxes = Array.from(new Map(allTextBoxes.map(tb => [tb.id, tb])).values());
+        const localTbIds = localTextBoxes.map((tb: any) => tb.id);
+        const remoteTbOnly = remoteTextBoxes.filter((tb: any) => !localTbIds.includes(tb.id));
+        (base as any).textBoxes = [...localTextBoxes, ...remoteTbOnly];
       }
       merged = base;
     }
-    // バージョン・更新日付をリモート基準で進める
     merged.version = (remote as any).version;
     merged.updatedAt = nowIso();
     try {
@@ -1336,7 +1378,6 @@ export default function HomePage() {
       let saved: Project | Page | null = null;
       if (pendingConflict.kind === "project") {
         const local = pendingConflict.local as Project;
-        // Firestoreから最新versionを取得
         const remote = await fetchRemoteProject(local.id);
         const remoteVersion = remote && typeof remote.version === "number" ? remote.version : 0;
         const next = { ...local, version: remoteVersion, updatedAt: nowIso() };
@@ -1345,13 +1386,20 @@ export default function HomePage() {
         setProjects((prev) => prev.map((p) => p.id === local.id && saved && "name" in saved ? saved as Project : p));
       } else {
         const local = pendingConflict.local as Page;
-        // Firestoreから最新versionを取得
         const remote = await fetchRemotePage(local.id);
         const remoteVersion = remote && typeof remote.version === "number" ? remote.version : 0;
-        const next = { ...local, version: remoteVersion, updatedAt: nowIso() } as Page;
-        await persistPageWithVersion(next, currentOwnerId);
-        saved = await fetchRemotePage(local.id);
-        setPages((prev) => prev.map((p) => p.id === local.id && saved && "title" in saved ? saved as Page : p));
+        if (isLargeDifference(local, remote)) {
+          // 新規ページとして追加
+          const newId = local.id + "_copy_" + Date.now();
+          const newPage = { ...local, id: newId, title: (local.title || "") + " (コピー)" };
+          await persistPageWithVersion(newPage, currentOwnerId);
+          setPages((prev) => [...prev, newPage]);
+        } else {
+          const next = { ...local, version: remoteVersion, updatedAt: nowIso() } as Page;
+          await persistPageWithVersion(next, currentOwnerId);
+          saved = await fetchRemotePage(local.id);
+          setPages((prev) => prev.map((p) => p.id === local.id && saved && "title" in saved ? saved as Page : p));
+        }
       }
       setPendingConflict(null);
       setDataMessage("ローカルの内容で上書きしました");
