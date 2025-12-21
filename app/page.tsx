@@ -1173,7 +1173,7 @@ export default function HomePage() {
     setAccountKeyInput("");
   }, []);
 
-  const handleLocalAccountLogin = useCallback(() => {
+  const handleLocalAccountLogin = useCallback(async () => {
     if (isAuthSigningIn) return;
     const name = accountNameInput.trim();
     const key = accountKeyInput.trim();
@@ -1187,6 +1187,11 @@ export default function HomePage() {
     setActiveAccountId(name);
     setAccountMessage("ローカルアカウントでログインしました");
     setIsAccountModalOpen(false);
+    // Firestore初期化（データ取得 or 新規作成）
+    setTimeout(() => {
+      // currentOwnerIdはuseMemoなので即時反映されない場合があるため、少し遅延
+      window.location.reload(); // 状態を確実に反映させるためリロード
+    }, 300);
     setIsAuthSigningIn(false);
   }, [isAuthSigningIn, accountNameInput, accountKeyInput]);
 
