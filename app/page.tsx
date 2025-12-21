@@ -1280,8 +1280,9 @@ export default function HomePage() {
       const local = pendingConflict.local as Page;
       if (isLargeDifference(local, remote)) {
         // 新規ページとして追加
-        const newId = remote.id + "_copy_" + Date.now();
-        const newPage = { ...remote, id: newId, title: (remote.title || "") + " (コピー)" };
+        const remotePage = remote as Page;
+        const newId = remotePage.id + "_copy_" + Date.now();
+        const newPage = { ...remotePage, id: newId, title: (remotePage.title || "") + " (コピー)" };
         setPages((prev) => [...prev, newPage]);
         lastPersistedPagesRef.current = [...lastPersistedPagesRef.current, newPage];
       } else {
@@ -1299,13 +1300,15 @@ export default function HomePage() {
     const { kind, local, remote } = pendingConflict;
     // 差分が大きい場合は新規ページとして両方残す
     if (kind === "page" && isLargeDifference(local, remote)) {
-      const newId = local.id + "_copy_" + Date.now();
-      const newPage = { ...local, id: newId, title: (local.title || "") + " (コピー)" };
+      const localPage = local as Page;
+      const remotePage = remote as Page;
+      const newId = localPage.id + "_copy_" + Date.now();
+      const newPage = { ...localPage, id: newId, title: (localPage.title || "") + " (コピー)" };
       await persistPageWithVersion(newPage, currentOwnerId);
       setPages((prev) => [...prev, newPage]);
       // 既存ページはリモートで上書き
-      await persistPageWithVersion(remote, currentOwnerId);
-      setPages((prev) => prev.map((p) => p.id === remote.id ? remote : p));
+      await persistPageWithVersion(remotePage, currentOwnerId);
+      setPages((prev) => prev.map((p) => p.id === remotePage.id ? remotePage : p));
       setPendingConflict(null);
       setDataMessage("大きな差分があったため両方のバージョンを残しました");
       return;
@@ -1392,8 +1395,9 @@ export default function HomePage() {
         const remoteVersion = remote && typeof remote.version === "number" ? remote.version : 0;
         if (isLargeDifference(local, remote)) {
           // 新規ページとして追加
-          const newId = local.id + "_copy_" + Date.now();
-          const newPage = { ...local, id: newId, title: (local.title || "") + " (コピー)" };
+          const localPage = local as Page;
+          const newId = localPage.id + "_copy_" + Date.now();
+          const newPage = { ...localPage, id: newId, title: (localPage.title || "") + " (コピー)" };
           await persistPageWithVersion(newPage, currentOwnerId);
           setPages((prev) => [...prev, newPage]);
         } else {
