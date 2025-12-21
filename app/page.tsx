@@ -504,6 +504,11 @@ export default function HomePage() {
 
   const flushPersist = useCallback(async () => {
     if (firebaseUser && currentOwnerId) {
+      // 競合ダイアログが表示中なら保存処理を中断
+      if (pendingConflict) {
+        setDataMessage("競合解決中です。選択が終わるまで保存できません。");
+        return;
+      }
       const changedProjects = getChangedItems(projects, lastPersistedProjectsRef.current);
       const changedPages = getChangedItems(pages, lastPersistedPagesRef.current);
       if (changedProjects.length === 0 && changedPages.length === 0) {
@@ -532,6 +537,9 @@ export default function HomePage() {
           const target = changedProjects[0] ?? changedPages[0];
           if (target) {
             await handleVersionConflict(isProjectEntity(target) ? "project" : "page", target.id, target as any);
+            // pendingConflictがセットされるので、以降のflushPersistは保存を中断する
+            setDataMessage("競合が発生しました。選択が終わるまで保存できません。");
+            return;
           }
         } else {
           setDataMessage("即時保存に失敗しました");
@@ -1183,8 +1191,7 @@ export default function HomePage() {
       });
       return;
     }
-    // ローカルアカウントのみローカル保存、Firestoreには保存しない
-    persistLocalData();
+    // ログアウト時は未保存編集をFirestoreに保存しない（ローカルのみ保存）
     setLocalAccount(null);
     setActiveAccountId(null);
     setAccountMessage("ログアウトしました");
