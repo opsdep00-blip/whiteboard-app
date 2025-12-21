@@ -680,7 +680,7 @@ export default function HomePage() {
 
   useEffect(() => {
     const loadFromFirestore = async () => {
-      if (!currentOwnerId) {
+      if (!currentOwnerId && !localAccount && !firebaseUser) {
         resetToLocalDefaults();
         return;
       }
@@ -1186,10 +1186,7 @@ export default function HomePage() {
     setAccountMessage("ローカルアカウントでログインしました");
     setIsAccountModalOpen(false);
     // Firestore初期化（データ取得 or 新規作成）
-    setTimeout(() => {
-      // currentOwnerIdはuseMemoなので即時反映されない場合があるため、十分遅延
-      window.location.reload(); // 状態を確実に反映させるためリロード
-    }, 1000);
+    // リロードせず、localAccountのセットだけで状態遷移を進める
     setIsAuthSigningIn(false);
   }, [isAuthSigningIn, accountNameInput, accountKeyInput]);
 
