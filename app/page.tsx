@@ -475,29 +475,47 @@ export default function HomePage() {
     }
   }, [firebaseUser, localAccount, projects, pages, activeProjectId, activePageId]);
 
+  const handleVersionConflict = useCallback(
+    async (kind: "project" | "page", id: string, local: Project | Page) => {
+      try {
+        const remote = kind === "project" ? await fetchRemoteProject(id) : await fetchRemotePage(id);
+        if (!remote) {
+          setDataMessage("競合検出: リモートデータが見つかりませんでした");
+          return;
+        }
+        setPendingConflict({ kind, id, local, remote });
+        setDataMessage("他の端末で更新がありました。どちらを採用するか選択してください。");
+      } catch (error) {
+        console.error("競合取得に失敗", error);
+      }
+    },
+    []
+  );
+
   const flushPersist = useCallback(async () => {
     if (firebaseUser && currentOwnerId) {
+      const changedProjects = getChangedItems(projects, lastPersistedProjectsRef.current);
+      const changedPages = getChangedItems(pages, lastPersistedPagesRef.current);
+      if (changedProjects.length === 0 && changedPages.length === 0) {
+        return;
+      }
       try {
-        const changedProjects = getChangedItems(projects, lastPersistedProjectsRef.current);
-        const changedPages = getChangedItems(pages, lastPersistedPagesRef.current);
-        if (changedProjects.length || changedPages.length) {
-          const [projectResults, pageResults] = await Promise.all([
-            Promise.all(changedProjects.map((project) => persistProjectWithVersion(project, currentOwnerId))),
-            Promise.all(changedPages.map((page) => persistPageWithVersion(page, currentOwnerId)))
-          ]);
-          const updatedProjects = projects.map((project) => {
-            const hit = projectResults.find((item) => item.id === project.id);
-            return hit ? { ...project, version: hit.version, updatedAt: hit.updatedAt } : project;
-          });
-          const updatedPages = pages.map((page) => {
-            const hit = pageResults.find((item) => item.id === page.id);
-            return hit ? { ...page, version: hit.version, updatedAt: hit.updatedAt } : page;
-          });
-          lastPersistedProjectsRef.current = updatedProjects;
-          lastPersistedPagesRef.current = updatedPages;
-          setProjects(updatedProjects);
-          setPages(updatedPages);
-        }
+        const [projectResults, pageResults] = await Promise.all([
+          Promise.all(changedProjects.map((project) => persistProjectWithVersion(project, currentOwnerId))),
+          Promise.all(changedPages.map((page) => persistPageWithVersion(page, currentOwnerId)))
+        ]);
+        const updatedProjects = projects.map((project) => {
+          const hit = projectResults.find((item) => item.id === project.id);
+          return hit ? { ...project, version: hit.version, updatedAt: hit.updatedAt } : project;
+        });
+        const updatedPages = pages.map((page) => {
+          const hit = pageResults.find((item) => item.id === page.id);
+          return hit ? { ...page, version: hit.version, updatedAt: hit.updatedAt } : page;
+        });
+        lastPersistedProjectsRef.current = updatedProjects;
+        lastPersistedPagesRef.current = updatedPages;
+        setProjects(updatedProjects);
+        setPages(updatedPages);
       } catch (error) {
         const isConflict = error instanceof Error && error.message === "version-mismatch";
         if (isConflict) {
@@ -515,7 +533,7 @@ export default function HomePage() {
     if (!firebaseUser && localAccount) {
       persistLocalData();
     }
-  }, [firebaseUser, currentOwnerId, projects, pages, localAccount, persistLocalData]);
+  }, [firebaseUser, currentOwnerId, projects, pages, localAccount, persistLocalData, handleVersionConflict]);
   const [linkingFrom, setLinkingFrom] = useState<MindmapConnector | null>(null);
   const [linkingCursor, setLinkingCursor] = useState<{ x: number; y: number } | null>(null);
   const [mindmapScale, setMindmapScale] = useState(1);
@@ -1052,23 +1070,6 @@ export default function HomePage() {
       }
     };
   }, []);
-
-  const handleVersionConflict = useCallback(
-    async (kind: "project" | "page", id: string, local: Project | Page) => {
-      try {
-        const remote = kind === "project" ? await fetchRemoteProject(id) : await fetchRemotePage(id);
-        if (!remote) {
-          setDataMessage("競合検出: リモートデータが見つかりませんでした");
-          return;
-        }
-        setPendingConflict({ kind, id, local, remote });
-        setDataMessage("他の端末で更新がありました。どちらを採用するか選択してください。");
-      } catch (error) {
-        console.error("競合取得に失敗", error);
-      }
-    },
-    []
-  );
 
   const boardCounts = useMemo(() => {
     return boards.reduce<Record<BoardType, number>>(
