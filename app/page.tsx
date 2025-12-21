@@ -1314,13 +1314,16 @@ export default function HomePage() {
     try {
       if (kind === "project") {
         await persistProjectWithVersion(merged, currentOwnerId);
-        setProjects((prev) => prev.map((p) => (p.id === merged.id ? merged : p)));
-        lastPersistedProjectsRef.current = lastPersistedProjectsRef.current.map((p) => (p.id === merged.id ? merged : p));
       } else {
         await persistPageWithVersion(merged, currentOwnerId);
-        setPages((prev) => prev.map((p) => (p.id === merged.id ? merged : p)));
-        lastPersistedPagesRef.current = lastPersistedPagesRef.current.map((p) => (p.id === merged.id ? merged : p));
       }
+      // Firestoreから最新データを再取得して同期
+      const updatedProjectsSnap = await getDocs(query(collection(db, "projects"), where("owner", "==", currentOwnerId)));
+      const updatedProjects = updatedProjectsSnap.docs.map((docSnap) => ({ ...docSnap.data(), id: docSnap.id } as Project));
+      const updatedPagesSnap = await getDocs(query(collection(db, "pages"), where("owner", "==", currentOwnerId)));
+      const updatedPages = updatedPagesSnap.docs.map((docSnap) => ({ ...docSnap.data(), id: docSnap.id } as Page));
+      setProjects(updatedProjects);
+      setPages(updatedPages);
       setPendingConflict(null);
       setDataMessage("両方の内容をマージして保存しました");
     } catch (error) {
@@ -1336,19 +1339,20 @@ export default function HomePage() {
         const local = pendingConflict.local as Project;
         const remoteVersion = typeof (pendingConflict.remote as Project).version === "number" ? (pendingConflict.remote as Project).version : 0;
         const next = { ...local, version: remoteVersion, updatedAt: nowIso() };
-        const result = await persistProjectWithVersion(next, currentOwnerId);
-        const merged = { ...local, version: result.version, updatedAt: result.updatedAt };
-        setProjects((prev) => prev.map((p) => (p.id === merged.id ? merged : p)));
-        lastPersistedProjectsRef.current = lastPersistedProjectsRef.current.map((p) => (p.id === merged.id ? merged : p));
+        await persistProjectWithVersion(next, currentOwnerId);
       } else {
         const local = pendingConflict.local as Page;
         const remoteVersion = typeof (pendingConflict.remote as Page).version === "number" ? (pendingConflict.remote as Page).version : 0;
         const next = { ...local, version: remoteVersion, updatedAt: nowIso() } as Page;
-        const result = await persistPageWithVersion(next, currentOwnerId);
-        const merged = { ...local, version: result.version, updatedAt: result.updatedAt } as Page;
-        setPages((prev) => prev.map((p) => (p.id === merged.id ? merged : p)));
-        lastPersistedPagesRef.current = lastPersistedPagesRef.current.map((p) => (p.id === merged.id ? merged : p));
+        await persistPageWithVersion(next, currentOwnerId);
       }
+      // Firestoreから最新データを再取得して同期
+      const updatedProjectsSnap = await getDocs(query(collection(db, "projects"), where("owner", "==", currentOwnerId)));
+      const updatedProjects = updatedProjectsSnap.docs.map((docSnap) => ({ ...docSnap.data(), id: docSnap.id } as Project));
+      const updatedPagesSnap = await getDocs(query(collection(db, "pages"), where("owner", "==", currentOwnerId)));
+      const updatedPages = updatedPagesSnap.docs.map((docSnap) => ({ ...docSnap.data(), id: docSnap.id } as Page));
+      setProjects(updatedProjects);
+      setPages(updatedPages);
       setPendingConflict(null);
       setDataMessage("ローカルの内容で上書きしました");
     } catch (error) {
