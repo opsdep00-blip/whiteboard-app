@@ -8,7 +8,7 @@ import {
   signInWithPopup,
   signOut
 } from "firebase/auth";
-import { collection, deleteDoc, doc, getDoc, getDocs, query, setDoc, where } from "firebase/firestore";
+import { collection, deleteDoc, doc, getDoc, getDocs, query, runTransaction, setDoc, where } from "firebase/firestore";
 import { auth, db } from "../src/lib/firebase";
 import type { MouseEvent as ReactMouseEvent, WheelEvent as ReactWheelEvent, ReactNode } from "react";
 import { FcAlphabeticalSortingAz, FcFaq, FcFile, FcLock, FcMindMap, FcSettings } from "react-icons/fc";
@@ -35,6 +35,8 @@ type MarkdownPage = {
   title: string;
   projectId: string;
   owner?: string;
+  version?: number;
+  updatedAt?: string;
   content: string;
 };
 
@@ -83,6 +85,8 @@ type MindmapPage = {
   title: string;
   projectId: string;
   owner?: string;
+  version?: number;
+  updatedAt?: string;
   nodes: MindmapNode[];
   textBoxes?: MindmapTextBox[];
   links: MindmapLink[];
@@ -100,6 +104,8 @@ type RankingPage = {
   title: string;
   projectId: string;
   owner?: string;
+  version?: number;
+  updatedAt?: string;
   items: RankingItem[];
   note?: string;
 };
@@ -124,6 +130,8 @@ type QAPage = {
   title: string;
   projectId: string;
   owner?: string;
+  version?: number;
+  updatedAt?: string;
   cards: QACard[];
 };
 
@@ -133,6 +141,15 @@ type Project = {
   id: string;
   name: string;
   owner?: string;
+  version?: number;
+  updatedAt?: string;
+};
+
+type ConflictItem = {
+  kind: "project" | "page";
+  id: string;
+  local: Project | Page;
+  remote: Project | Page;
 };
 
 type LocalAccount = {
@@ -155,7 +172,7 @@ const boards: Board[] = [
 ];
 
 const initialProjects: Project[] = [
-  { id: "default-project", name: "プロジェクトA" }
+  { id: "default-project", name: "プロジェクトA", version: 0, updatedAt: new Date().toISOString() }
 ];
 
 const DEFAULT_PROJECT_ID = initialProjects[0]?.id ?? "default-project";
@@ -267,6 +284,72 @@ const getChangedItems = <T extends { id: string }>(current: T[], last: T[]) => {
   });
 };
 
+const nowIso = () => new Date().toISOString();
+
+const isProjectEntity = (item: Project | Page): item is Project => !("boardId" in item);
+
+const persistProjectWithVersion = async (project: Project, ownerId: string) => {
+  const ref = doc(db, "projects", project.id);
+  const updatedAt = nowIso();
+  const version = await runTransaction(db, async (tx) => {
+    const snap = await tx.get(ref);
+    const data = snap.data() as Project | undefined;
+    const remoteVersion = typeof data?.version === "number" ? data.version : 0;
+    const currentVersion = typeof project.version === "number" ? project.version : 0;
+    if (snap.exists() && remoteVersion !== currentVersion) {
+      throw new Error("version-mismatch");
+    }
+    const nextVersion = (snap.exists() ? remoteVersion : currentVersion) + 1;
+    tx.set(ref, { ...project, owner: ownerId, version: nextVersion, updatedAt });
+    return nextVersion;
+  });
+  return { id: project.id, version, updatedAt } as const;
+};
+
+const persistPageWithVersion = async (page: Page, ownerId: string) => {
+  const ref = doc(db, "pages", page.id);
+  const updatedAt = nowIso();
+  const version = await runTransaction(db, async (tx) => {
+    const snap = await tx.get(ref);
+    const data = snap.data() as Page | undefined;
+    const remoteVersion = typeof (data as any)?.version === "number" ? (data as any).version : 0;
+    const currentVersion = typeof (page as any).version === "number" ? (page as any).version : 0;
+    if (snap.exists() && remoteVersion !== currentVersion) {
+      throw new Error("version-mismatch");
+    }
+    const nextVersion = (snap.exists() ? remoteVersion : currentVersion) + 1;
+    tx.set(ref, { ...page, owner: ownerId, version: nextVersion, updatedAt });
+    return nextVersion;
+  });
+  return { id: page.id, version, updatedAt } as const;
+};
+
+const fetchRemoteProject = async (id: string): Promise<Project | null> => {
+  const ref = doc(db, "projects", id);
+  const snap = await getDoc(ref);
+  if (!snap.exists()) return null;
+  const data = snap.data() as Project;
+  return {
+    ...data,
+    id: snap.id,
+    version: typeof data.version === "number" ? data.version : 0,
+    updatedAt: typeof data.updatedAt === "string" ? data.updatedAt : undefined
+  };
+};
+
+const fetchRemotePage = async (id: string): Promise<Page | null> => {
+  const ref = doc(db, "pages", id);
+  const snap = await getDoc(ref);
+  if (!snap.exists()) return null;
+  const data = snap.data() as Page;
+  return {
+    ...data,
+    id: snap.id,
+    version: typeof (data as any).version === "number" ? (data as any).version : 0,
+    updatedAt: typeof (data as any).updatedAt === "string" ? (data as any).updatedAt : undefined
+  } as Page;
+};
+
 const createSection = (text: string): MindmapSection => ({
   id: createId("section"),
   text
@@ -283,6 +366,8 @@ const createMarkdownPage = (title: string, projectId: string): MarkdownPage => (
   boardId: "proposal",
   title,
   projectId,
+  version: 0,
+  updatedAt: new Date().toISOString(),
   content: ""
 });
 
@@ -291,6 +376,8 @@ const createMindmapPage = (title: string, projectId: string): MindmapPage => ({
   boardId: "mindmap",
   title,
   projectId,
+  version: 0,
+  updatedAt: new Date().toISOString(),
   nodes: [],
   textBoxes: [],
   links: []
@@ -301,6 +388,8 @@ const createRankingPage = (title: string, projectId: string): RankingPage => ({
   boardId: "ranking",
   title,
   projectId,
+  version: 0,
+  updatedAt: new Date().toISOString(),
   items: []
 });
 
@@ -323,6 +412,8 @@ const createQAPage = (title: string, projectId: string): QAPage => ({
   boardId: "qa",
   title,
   projectId,
+  version: 0,
+  updatedAt: new Date().toISOString(),
   cards: []
 });
 
@@ -353,6 +444,7 @@ export default function HomePage() {
   const [isAccountModalOpen, setIsAccountModalOpen] = useState(false);
   const [accountNameInput, setAccountNameInput] = useState("");
   const [accountKeyInput, setAccountKeyInput] = useState("");
+  const [pendingConflict, setPendingConflict] = useState<ConflictItem | null>(null);
   const activeProject = useMemo(
     () => projects.find((project) => project.id === activeProjectId) ?? null,
     [projects, activeProjectId]
@@ -389,20 +481,33 @@ export default function HomePage() {
         const changedProjects = getChangedItems(projects, lastPersistedProjectsRef.current);
         const changedPages = getChangedItems(pages, lastPersistedPagesRef.current);
         if (changedProjects.length || changedPages.length) {
-          await Promise.all([
-            Promise.all(
-              changedProjects.map((project) =>
-                setDoc(doc(db, "projects", project.id), { ...project, owner: currentOwnerId })
-              )
-            ),
-            Promise.all(
-              changedPages.map((page) => setDoc(doc(db, "pages", page.id), { ...page, owner: currentOwnerId }))
-            )
+          const [projectResults, pageResults] = await Promise.all([
+            Promise.all(changedProjects.map((project) => persistProjectWithVersion(project, currentOwnerId))),
+            Promise.all(changedPages.map((page) => persistPageWithVersion(page, currentOwnerId)))
           ]);
-          lastPersistedProjectsRef.current = projects;
-          lastPersistedPagesRef.current = pages;
+          const updatedProjects = projects.map((project) => {
+            const hit = projectResults.find((item) => item.id === project.id);
+            return hit ? { ...project, version: hit.version, updatedAt: hit.updatedAt } : project;
+          });
+          const updatedPages = pages.map((page) => {
+            const hit = pageResults.find((item) => item.id === page.id);
+            return hit ? { ...page, version: hit.version, updatedAt: hit.updatedAt } : page;
+          });
+          lastPersistedProjectsRef.current = updatedProjects;
+          lastPersistedPagesRef.current = updatedPages;
+          setProjects(updatedProjects);
+          setPages(updatedPages);
         }
       } catch (error) {
+        const isConflict = error instanceof Error && error.message === "version-mismatch";
+        if (isConflict) {
+          const target = changedProjects[0] ?? changedPages[0];
+          if (target) {
+            await handleVersionConflict(isProjectEntity(target) ? "project" : "page", target.id, target as any);
+          }
+        } else {
+          setDataMessage("即時保存に失敗しました");
+        }
         console.error("即時保存に失敗しました", error);
       }
       return;
@@ -551,7 +656,9 @@ export default function HomePage() {
           return {
             id: docSnap.id,
             name: typeof data.name === "string" ? data.name : "無題プロジェクト",
-            owner: typeof data.owner === "string" ? data.owner : currentOwnerId
+            owner: typeof data.owner === "string" ? data.owner : currentOwnerId,
+            version: typeof data.version === "number" ? data.version : 0,
+            updatedAt: typeof data.updatedAt === "string" ? data.updatedAt : undefined
           } as Project;
         });
 
@@ -574,7 +681,13 @@ export default function HomePage() {
         let loadedPages: Page[] = pagesSnap.docs
           .map((docSnap) => {
             const data = docSnap.data() as Page;
-            return { ...data, id: docSnap.id, owner: typeof (data as any).owner === "string" ? (data as any).owner : currentOwnerId } as Page;
+            return {
+              ...data,
+              id: docSnap.id,
+              owner: typeof (data as any).owner === "string" ? (data as any).owner : currentOwnerId,
+              version: typeof (data as any).version === "number" ? (data as any).version : 0,
+              updatedAt: typeof (data as any).updatedAt === "string" ? (data as any).updatedAt : undefined
+            } as Page;
           })
           .filter((page) => page && typeof (page as any).id === "string");
 
@@ -647,13 +760,27 @@ export default function HomePage() {
     if (changedProjects.length === 0) return;
     projectsPersistTimerRef.current = window.setTimeout(async () => {
       try {
-        await Promise.all(
-          changedProjects.map((project) => setDoc(doc(db, "projects", project.id), { ...project, owner: currentOwnerId }))
+        const results = await Promise.all(
+          changedProjects.map((project) => persistProjectWithVersion(project, currentOwnerId))
         );
-        lastPersistedProjectsRef.current = projects;
+        const updatedProjects = projects.map((project) => {
+          const hit = results.find((item) => item.id === project.id);
+          return hit ? { ...project, version: hit.version, updatedAt: hit.updatedAt } : project;
+        });
+        lastPersistedProjectsRef.current = updatedProjects;
+        setProjects(updatedProjects);
         setDataMessage("");
       } catch (error) {
+        const isConflict = error instanceof Error && error.message === "version-mismatch";
         console.error("プロジェクト同期失敗", error);
+        if (isConflict) {
+          const conflicted = changedProjects[0];
+          if (conflicted) {
+            await handleVersionConflict("project", conflicted.id, conflicted);
+          }
+        } else {
+          setDataMessage("プロジェクト同期に失敗しました");
+        }
       }
     }, 1600);
     return () => {
@@ -703,14 +830,28 @@ export default function HomePage() {
     if (changedPages.length === 0) return;
     pagesPersistTimerRef.current = window.setTimeout(async () => {
       try {
-        await Promise.all(
-          changedPages.map((page) => setDoc(doc(db, "pages", page.id), { ...page, owner: currentOwnerId }))
+        const results = await Promise.all(
+          changedPages.map((page) => persistPageWithVersion(page, currentOwnerId))
         );
-        lastPersistedPagesRef.current = pages;
+        const updatedPages = pages.map((page) => {
+          const hit = results.find((item) => item.id === page.id);
+          return hit ? { ...page, version: hit.version, updatedAt: hit.updatedAt } : page;
+        });
+        lastPersistedPagesRef.current = updatedPages;
+        setPages(updatedPages);
         setDataMessage("ページを同期しました");
       } catch (error) {
+        const isConflict = error instanceof Error && error.message === "version-mismatch";
         // サイレントに失敗をログへ出すだけに留める
         console.error("ページ同期失敗", error);
+        if (isConflict) {
+          const conflicted = changedPages[0];
+          if (conflicted) {
+            await handleVersionConflict("page", conflicted.id, conflicted);
+          }
+        } else {
+          setDataMessage("ページ同期に失敗しました");
+        }
       }
     }, 1600);
     return () => {
@@ -912,6 +1053,23 @@ export default function HomePage() {
     };
   }, []);
 
+  const handleVersionConflict = useCallback(
+    async (kind: "project" | "page", id: string, local: Project | Page) => {
+      try {
+        const remote = kind === "project" ? await fetchRemoteProject(id) : await fetchRemotePage(id);
+        if (!remote) {
+          setDataMessage("競合検出: リモートデータが見つかりませんでした");
+          return;
+        }
+        setPendingConflict({ kind, id, local, remote });
+        setDataMessage("他の端末で更新がありました。どちらを採用するか選択してください。");
+      } catch (error) {
+        console.error("競合取得に失敗", error);
+      }
+    },
+    []
+  );
+
   const boardCounts = useMemo(() => {
     return boards.reduce<Record<BoardType, number>>(
       (acc, board) => {
@@ -1003,23 +1161,15 @@ export default function HomePage() {
     setAccountMessage("ローカルアカウントでログインしました");
     setIsAccountModalOpen(false);
     setIsAuthSigningIn(false);
-  }, [accountNameInput, accountKeyInput, isAuthSigningIn]);
+  }, [isAuthSigningIn, accountNameInput, accountKeyInput]);
 
   const handleAccountLogout = useCallback(() => {
     if (firebaseUser) {
-      flushPersist()
-        .finally(() =>
-          signOut(auth)
-            .then(() => setAccountMessage("ログアウトしました"))
-            .catch((error) => {
-              const message = error instanceof Error ? error.message : String(error);
-              setAccountMessage(`ログアウトに失敗しました: ${message}`);
-            })
-        )
-        .finally(() => {
-          resetToLocalDefaults();
-          setIsAccountModalOpen(false);
-        });
+      signOut(auth).finally(() => {
+        resetToLocalDefaults();
+        setIsAccountModalOpen(false);
+        setPendingConflict(null);
+      });
       return;
     }
     Promise.resolve(flushPersist()).finally(() => {
@@ -1028,6 +1178,7 @@ export default function HomePage() {
       setAccountMessage("ログアウトしました");
       resetToLocalDefaults();
       setIsAccountModalOpen(false);
+      setPendingConflict(null);
     });
   }, [firebaseUser, flushPersist, resetToLocalDefaults]);
 
@@ -1112,6 +1263,49 @@ export default function HomePage() {
     [adjustMindmapScale]
   );
 
+  const resolveConflictWithRemote = useCallback(() => {
+    if (!pendingConflict) return;
+    if (pendingConflict.kind === "project") {
+      const remote = pendingConflict.remote as Project;
+      setProjects((prev) => prev.map((p) => (p.id === remote.id ? remote : p)));
+      lastPersistedProjectsRef.current = lastPersistedProjectsRef.current.map((p) => (p.id === remote.id ? remote : p));
+    } else {
+      const remote = pendingConflict.remote as Page;
+      setPages((prev) => prev.map((p) => (p.id === remote.id ? remote : p)));
+      lastPersistedPagesRef.current = lastPersistedPagesRef.current.map((p) => (p.id === remote.id ? remote : p));
+    }
+    setPendingConflict(null);
+    setDataMessage("リモートの内容を採用しました");
+  }, [pendingConflict]);
+
+  const resolveConflictWithLocal = useCallback(async () => {
+    if (!pendingConflict || !firebaseUser || !currentOwnerId) return;
+    try {
+      if (pendingConflict.kind === "project") {
+        const local = pendingConflict.local as Project;
+        const remoteVersion = typeof (pendingConflict.remote as Project).version === "number" ? (pendingConflict.remote as Project).version : 0;
+        const next = { ...local, version: remoteVersion, updatedAt: nowIso() };
+        const result = await persistProjectWithVersion(next, currentOwnerId);
+        const merged = { ...local, version: result.version, updatedAt: result.updatedAt };
+        setProjects((prev) => prev.map((p) => (p.id === merged.id ? merged : p)));
+        lastPersistedProjectsRef.current = lastPersistedProjectsRef.current.map((p) => (p.id === merged.id ? merged : p));
+      } else {
+        const local = pendingConflict.local as Page;
+        const remoteVersion = typeof (pendingConflict.remote as Page).version === "number" ? (pendingConflict.remote as Page).version : 0;
+        const next = { ...local, version: remoteVersion, updatedAt: nowIso() } as Page;
+        const result = await persistPageWithVersion(next, currentOwnerId);
+        const merged = { ...local, version: result.version, updatedAt: result.updatedAt } as Page;
+        setPages((prev) => prev.map((p) => (p.id === merged.id ? merged : p)));
+        lastPersistedPagesRef.current = lastPersistedPagesRef.current.map((p) => (p.id === merged.id ? merged : p));
+      }
+      setPendingConflict(null);
+      setDataMessage("ローカルの内容で上書きしました");
+    } catch (error) {
+      console.error("競合解決に失敗", error);
+      setDataMessage("競合解決に失敗しました");
+    }
+  }, [pendingConflict, firebaseUser, currentOwnerId]);
+
   const handleMindmapMouseDown = useCallback(
     (event: React.MouseEvent) => {
       if (event.button !== 1) return;
@@ -1131,7 +1325,13 @@ export default function HomePage() {
   const handleAddProject = useCallback(() => {
     const trimmedName = newProjectName.trim();
     if (!trimmedName) return;
-    const newProject: Project = { id: createId("project"), name: trimmedName, owner: currentOwnerId ?? undefined };
+    const newProject: Project = {
+      id: createId("project"),
+      name: trimmedName,
+      owner: currentOwnerId ?? undefined,
+      version: 0,
+      updatedAt: nowIso()
+    };
     setProjects((prev) => [...prev, newProject]);
     const defaults = createDefaultPagesForProject(newProject.id).map((page) => ({ ...page, owner: currentOwnerId ?? page.owner }));
     setPages((prev) => [...prev, ...defaults]);
@@ -3924,6 +4124,7 @@ export default function HomePage() {
               <button
                 type="button"
                 onClick={handleLocalAccountLogin}
+                disabled={isAuthSigningIn}
                 style={{
                   flex: 1,
                   borderRadius: 10,
@@ -3931,7 +4132,8 @@ export default function HomePage() {
                   background: "var(--panel-minor)",
                   color: "inherit",
                   padding: "0.5rem 0.8rem",
-                  cursor: "pointer",
+                  cursor: isAuthSigningIn ? "not-allowed" : "pointer",
+                  opacity: isAuthSigningIn ? 0.6 : 1,
                   fontSize: 12,
                   textAlign: "center"
                 }}
@@ -3944,13 +4146,15 @@ export default function HomePage() {
               <button
                 type="button"
                 onClick={handleGoogleLogin}
+                disabled={isAuthSigningIn}
                 style={{
                   borderRadius: 10,
                   border: `1px solid var(--border)`,
                   background: "var(--panel-minor)",
                   color: "inherit",
                   padding: "0.5rem 0.8rem",
-                  cursor: "pointer",
+                  cursor: isAuthSigningIn ? "not-allowed" : "pointer",
+                  opacity: isAuthSigningIn ? 0.6 : 1,
                   fontSize: 12,
                   whiteSpace: "nowrap"
                 }}
@@ -3961,6 +4165,132 @@ export default function HomePage() {
             {accountMessage && (
               <p style={{ margin: 0, fontSize: 12, color: "var(--fg-muted)" }}>{accountMessage}</p>
             )}
+          </div>
+        </div>
+      )}
+
+      {pendingConflict && (
+        <div
+          role="presentation"
+          onClick={() => setPendingConflict(null)}
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(15, 23, 42, 0.45)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 60,
+            padding: "1rem"
+          }}
+        >
+          <div
+            role="dialog"
+            aria-label="競合解決"
+            onClick={(event) => event.stopPropagation()}
+            style={{
+              width: 520,
+              maxWidth: "calc(100vw - 2rem)",
+              borderRadius: 16,
+              padding: "1rem",
+              background: "var(--panel)",
+              border: `1px solid var(--border)`,
+              boxShadow: "0 30px 60px rgba(15,23,42,0.35)",
+              display: "flex",
+              flexDirection: "column",
+              gap: 12
+            }}
+          >
+            <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <strong style={{ fontSize: 14 }}>競合を解決してください</strong>
+              <button
+                type="button"
+                onClick={() => setPendingConflict(null)}
+                style={{
+                  border: "none",
+                  background: "transparent",
+                  color: "inherit",
+                  fontSize: 18,
+                  lineHeight: 1,
+                  cursor: "pointer",
+                  padding: 0
+                }}
+                aria-label="競合ダイアログを閉じる"
+              >
+                ×
+              </button>
+            </header>
+            <p style={{ fontSize: 12, opacity: 0.8, margin: 0 }}>
+              他の端末で更新されたため保存に失敗しました。どちらの内容を採用するか選んでください。
+            </p>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+              <div style={{ border: `1px solid var(--border)`, borderRadius: 12, padding: "0.75rem", background: "var(--panel-minor)" }}>
+                <strong style={{ fontSize: 12 }}>ローカルの変更</strong>
+                <div style={{ fontSize: 12, opacity: 0.8, marginTop: 6 }}>
+                  {pendingConflict.kind === "project" ? (
+                    <>
+                      <div>名前: {(pendingConflict.local as Project).name}</div>
+                      <div>更新版: {(pendingConflict.local as Project).version ?? 0}</div>
+                    </>
+                  ) : (
+                    <>
+                      <div>タイトル: {(pendingConflict.local as Page).title}</div>
+                      <div>更新版: {(pendingConflict.local as Page).version ?? 0}</div>
+                    </>
+                  )}
+                </div>
+              </div>
+              <div style={{ border: `1px solid var(--border)`, borderRadius: 12, padding: "0.75rem", background: "var(--panel-minor)" }}>
+                <strong style={{ fontSize: 12 }}>リモートの最新</strong>
+                <div style={{ fontSize: 12, opacity: 0.8, marginTop: 6 }}>
+                  {pendingConflict.kind === "project" ? (
+                    <>
+                      <div>名前: {(pendingConflict.remote as Project).name}</div>
+                      <div>更新版: {(pendingConflict.remote as Project).version ?? 0}</div>
+                    </>
+                  ) : (
+                    <>
+                      <div>タイトル: {(pendingConflict.remote as Page).title}</div>
+                      <div>更新版: {(pendingConflict.remote as Page).version ?? 0}</div>
+                    </>
+                  )}
+                </div>
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              <button
+                type="button"
+                onClick={resolveConflictWithRemote}
+                style={{
+                  borderRadius: 10,
+                  border: `1px solid var(--border)`,
+                  background: "var(--panel-minor)",
+                  color: "inherit",
+                  padding: "0.45rem 0.8rem",
+                  cursor: "pointer",
+                  fontSize: 12
+                }}
+              >
+                最新を採用
+              </button>
+              <button
+                type="button"
+                onClick={resolveConflictWithLocal}
+                disabled={!firebaseUser}
+                style={{
+                  borderRadius: 10,
+                  border: "none",
+                  background: "var(--accent)",
+                  color: "var(--accent-contrast)",
+                  padding: "0.45rem 0.9rem",
+                  cursor: firebaseUser ? "pointer" : "not-allowed",
+                  opacity: firebaseUser ? 1 : 0.5,
+                  fontSize: 12
+                }}
+              >
+                ローカルで上書き
+              </button>
+            </div>
           </div>
         </div>
       )}
