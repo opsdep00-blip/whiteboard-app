@@ -469,8 +469,9 @@ export default function HomePage() {
   }, [firebaseUser?.uid, localAccount]);
   const lastPersistedProjectsRef = useRef<Project[]>(initialProjects);
   const lastPersistedPagesRef = useRef<Page[]>(INITIAL_PAGES_FOR_DEFAULT_PROJECT);
+  // 未ログイン時のみlocalStorageを使う
   const persistLocalData = useCallback(() => {
-    if (firebaseUser || !localAccount) return;
+    if (firebaseUser || localAccount) return; // ログイン済みなら使わない
     if (typeof window === "undefined") return;
     const payload: LocalPersistedData = {
       projects,
@@ -479,7 +480,7 @@ export default function HomePage() {
       activePageId
     };
     try {
-      window.localStorage.setItem(getLocalAccountDataKey(localAccount), JSON.stringify(payload));
+      window.localStorage.setItem("whiteboard-guest-data", JSON.stringify(payload));
     } catch (error) {
       console.error("ローカル保存に失敗しました", error);
     }
@@ -503,8 +504,8 @@ export default function HomePage() {
   );
 
   const flushPersist = useCallback(async () => {
-    if (firebaseUser && currentOwnerId) {
-      // 競合ダイアログが表示中なら保存処理を中断
+    // ログイン済み（Google/アカウント名＋キー）はFirestoreのみ
+    if (currentOwnerId) {
       if (pendingConflict) {
         setDataMessage("競合解決中です。選択が終わるまで保存できません。");
         return;
@@ -537,7 +538,6 @@ export default function HomePage() {
           const target = changedProjects[0] ?? changedPages[0];
           if (target) {
             await handleVersionConflict(isProjectEntity(target) ? "project" : "page", target.id, target as any);
-            // pendingConflictがセットされるので、以降のflushPersistは保存を中断する
             setDataMessage("競合が発生しました。選択が終わるまで保存できません。");
             return;
           }
@@ -548,10 +548,11 @@ export default function HomePage() {
       }
       return;
     }
-    if (!firebaseUser && localAccount) {
+    // 未ログイン時のみlocalStorage保存
+    if (!currentOwnerId && !firebaseUser && !localAccount) {
       persistLocalData();
     }
-  }, [firebaseUser, currentOwnerId, projects, pages, localAccount, persistLocalData, handleVersionConflict]);
+  }, [currentOwnerId, projects, pages, localAccount, firebaseUser, persistLocalData, handleVersionConflict, pendingConflict]);
   const [linkingFrom, setLinkingFrom] = useState<MindmapConnector | null>(null);
   const [linkingCursor, setLinkingCursor] = useState<{ x: number; y: number } | null>(null);
   const [mindmapScale, setMindmapScale] = useState(1);
@@ -743,13 +744,14 @@ export default function HomePage() {
     void loadFromFirestore();
   }, [firebaseUser, currentOwnerId, localAccount, resetToLocalDefaults]);
 
+  // 未ログイン時のみlocalStorageから復元
   useEffect(() => {
-    if (firebaseUser || !localAccount) return;
+    if (firebaseUser || localAccount) return;
     if (typeof window === "undefined") return;
-    const raw = window.localStorage.getItem(getLocalAccountDataKey(localAccount));
+    const raw = window.localStorage.getItem("whiteboard-guest-data");
     if (!raw) {
       resetToLocalDefaults();
-      setDataMessage("ローカルアカウント: 初期データを作成しました");
+      setDataMessage("ゲスト: 初期データを作成しました");
       return;
     }
     try {
@@ -771,11 +773,11 @@ export default function HomePage() {
           ? parsed.activePageId
           : nextPages.find((page) => page.projectId === nextActiveProjectId)?.id ?? "";
       setActivePageId(nextActivePageId);
-      setDataMessage("ローカルアカウントのデータを復元しました");
+      setDataMessage("ゲストデータを復元しました");
     } catch (error) {
-      console.error("ローカルデータ復元に失敗しました", error);
+      console.error("ゲストデータ復元に失敗しました", error);
       resetToLocalDefaults();
-      setDataMessage("ローカルデータが壊れていたため初期化しました");
+      setDataMessage("ゲストデータが壊れていたため初期化しました");
     }
   }, [firebaseUser, localAccount, resetToLocalDefaults]);
 
@@ -897,8 +899,9 @@ export default function HomePage() {
     };
   }, [pages, firebaseUser, currentOwnerId]);
 
+  // 未ログイン時のみlocalStorageへ自動保存
   useEffect(() => {
-    if (firebaseUser || !localAccount) return;
+    if (firebaseUser || localAccount) return;
     if (typeof window === "undefined") return;
     if (localPersistTimerRef.current) {
       window.clearTimeout(localPersistTimerRef.current);
