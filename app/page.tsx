@@ -862,23 +862,14 @@ export default function HomePage() {
         return;
       }
 
-      // 差分比較（新規追加分は両方残す）
-      const mergedProjects = [
-        ...remoteProjects,
-        ...projects.filter(lp => !remoteProjects.some(rp => rp.id === lp.id))
-      ];
-      const mergedPages = [
-        ...remotePages,
-        ...pages.filter(lp => !remotePages.some(rp => rp.id === lp.id))
-      ];
-
+      // 競合がなければローカルの全データでFirestoreを上書き
       await Promise.all([
-        ...projects.filter(lp => !remoteProjects.some(rp => rp.id === lp.id)).map(p => setDoc(doc(db, "projects", p.id), p)),
-        ...pages.filter(lp => !remotePages.some(rp => rp.id === lp.id)).map(p => setDoc(doc(db, "pages", p.id), p)),
+        ...projects.map(p => setDoc(doc(db, "projects", p.id), p)),
+        ...pages.map(p => setDoc(doc(db, "pages", p.id), p)),
       ]);
-      setProjects(mergedProjects);
-      setPages(mergedPages);
-      setDataMessage("保存しました（新規追加分のみマージ）");
+      setProjects(projects);
+      setPages(pages);
+      setDataMessage("保存しました（ローカルの内容で上書き）");
     } catch (error) {
       setDataMessage("保存に失敗しました");
       console.error(error);
