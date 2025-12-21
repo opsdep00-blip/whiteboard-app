@@ -4054,9 +4054,9 @@ export default function HomePage() {
                   </div>
                 </div>
               )}
-              // useEffect(() => {}, [projects, firebaseUser, currentOwnerId]);
-              // useEffect(() => {}, [pages, firebaseUser, currentOwnerId]);
-              // useEffect(() => {}, [projects, pages, activeProjectId, activePageId, firebaseUser, localAccount, persistLocalData]);
+              {/* useEffect(() => {}, [projects, firebaseUser, currentOwnerId]); */}
+              {/* useEffect(() => {}, [pages, firebaseUser, currentOwnerId]); */}
+              {/* useEffect(() => {}, [projects, pages, activeProjectId, activePageId, firebaseUser, localAccount, persistLocalData]); */}
             )}
             <div
               style={{
