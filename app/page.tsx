@@ -846,14 +846,21 @@ export default function HomePage() {
         return;
       }
 
-      // 競合がなければローカルの全データでFirestoreを上書き
+      // 競合がなければローカルの編集・新規追加分のみ保存
+      const changedProjects = getChangedItems(projects, remoteProjects);
+      const changedPages = getChangedItems(pages, remotePages);
       await Promise.all([
-        ...projects.map(p => setDoc(doc(db, "projects", p.id), p)),
-        ...pages.map(p => setDoc(doc(db, "pages", p.id), p)),
+        ...changedProjects.map(p => persistProjectWithVersion(p, currentOwnerId)),
+        ...changedPages.map(p => persistPageWithVersion(p, currentOwnerId)),
       ]);
-      setProjects(projects);
-      setPages(pages);
-      setDataMessage("保存しました（ローカルの内容で上書き）");
+      // Firestoreの最新versionでローカルを更新
+      const updatedProjectsSnap = await getDocs(query(collection(db, "projects"), where("owner", "==", currentOwnerId)));
+      const updatedProjects = updatedProjectsSnap.docs.map((docSnap) => ({ ...docSnap.data(), id: docSnap.id } as Project));
+      const updatedPagesSnap = await getDocs(query(collection(db, "pages"), where("owner", "==", currentOwnerId)));
+      const updatedPages = updatedPagesSnap.docs.map((docSnap) => ({ ...docSnap.data(), id: docSnap.id } as Page));
+      setProjects(updatedProjects);
+      setPages(updatedPages);
+      setDataMessage("保存しました（編集・新規分のみ反映）");
     } catch (error) {
       setDataMessage("保存に失敗しました");
       console.error(error);
