@@ -1283,6 +1283,76 @@ export default function HomePage() {
     setDataMessage("リモートの内容を採用しました");
   }, [pendingConflict]);
 
+  // 両方マージして保存
+  const resolveConflictWithMerge = useCallback(async () => {
+    if (!pendingConflict || !currentOwnerId) return;
+    const { kind, local, remote } = pendingConflict;
+    let merged: any = {};
+    if (kind === "project") {
+      // projectは基本的にlocal優先
+      merged = { ...remote, ...local };
+    } else {
+      // page: Q&A, ランキング, mindmap など
+      const base = { ...remote, ...local };
+      // Q&A
+      if (base.boardId === "qa") {
+        const localCards = (local as any).cards || [];
+        const remoteCards = (remote as any).cards || [];
+        // カードIDでユニークにマージ
+        const allCards = [...localCards, ...remoteCards];
+        const mergedCards = Array.from(new Map(allCards.map(card => [card.id, card])).values());
+        // 各カードのanswersもIDでマージ
+        mergedCards.forEach((card, idx) => {
+          const localCard = localCards.find((c: any) => c.id === card.id);
+          const remoteCard = remoteCards.find((c: any) => c.id === card.id);
+          if (localCard && remoteCard) {
+            const allAnswers = [...(localCard.answers || []), ...(remoteCard.answers || [])];
+            mergedCards[idx].answers = Array.from(new Map(allAnswers.map(ans => [ans.id, ans])).values());
+          }
+        });
+        base.cards = mergedCards;
+      }
+      // ランキング
+      if (base.boardId === "ranking") {
+        const localItems = (local as any).items || [];
+        const remoteItems = (remote as any).items || [];
+        const allItems = [...localItems, ...remoteItems];
+        base.items = Array.from(new Map(allItems.map(item => [item.id, item])).values());
+      }
+      // mindmap
+      if (base.boardId === "mindmap") {
+        const localNodes = (local as any).nodes || [];
+        const remoteNodes = (remote as any).nodes || [];
+        const allNodes = [...localNodes, ...remoteNodes];
+        base.nodes = Array.from(new Map(allNodes.map(node => [node.id, node])).values());
+        const localTextBoxes = (local as any).textBoxes || [];
+        const remoteTextBoxes = (remote as any).textBoxes || [];
+        const allTextBoxes = [...localTextBoxes, ...remoteTextBoxes];
+        base.textBoxes = Array.from(new Map(allTextBoxes.map(tb => [tb.id, tb])).values());
+      }
+      merged = base;
+    }
+    // バージョン・更新日付をリモート基準で進める
+    merged.version = (remote as any).version;
+    merged.updatedAt = nowIso();
+    try {
+      if (kind === "project") {
+        await persistProjectWithVersion(merged, currentOwnerId);
+        setProjects((prev) => prev.map((p) => (p.id === merged.id ? merged : p)));
+        lastPersistedProjectsRef.current = lastPersistedProjectsRef.current.map((p) => (p.id === merged.id ? merged : p));
+      } else {
+        await persistPageWithVersion(merged, currentOwnerId);
+        setPages((prev) => prev.map((p) => (p.id === merged.id ? merged : p)));
+        lastPersistedPagesRef.current = lastPersistedPagesRef.current.map((p) => (p.id === merged.id ? merged : p));
+      }
+      setPendingConflict(null);
+      setDataMessage("両方の内容をマージして保存しました");
+    } catch (error) {
+      setDataMessage("マージ保存に失敗しました");
+      console.error(error);
+    }
+  }, [pendingConflict, currentOwnerId]);
+
   const resolveConflictWithLocal = useCallback(async () => {
     if (!pendingConflict || !firebaseUser || !currentOwnerId) return;
     try {
@@ -3964,7 +4034,7 @@ export default function HomePage() {
                 <div style={{ fontWeight: 'bold', marginBottom: 8 }}>競合が発生しました</div>
                 <div style={{ marginBottom: 8 }}>
                   他の人が同じデータを編集・保存したため、内容が競合しています。<br />
-                  どちらの内容を採用するか選択してください。
+                  どちらの内容を採用するか、または両方マージして保存できます。
                 </div>
                 <div style={{ display: 'flex', gap: 16 }}>
                   <div style={{ flex: 1 }}>
@@ -3977,6 +4047,9 @@ export default function HomePage() {
                     <pre style={{ background: '#f5f5f5', padding: 8, borderRadius: 4, maxHeight: 180, overflow: 'auto' }}>{JSON.stringify(pendingConflict.remote, null, 2)}</pre>
                     <button style={{ marginTop: 8, background: '#888', color: '#fff', border: 'none', borderRadius: 4, padding: '4px 12px' }} onClick={resolveConflictWithRemote}>他の人の内容を採用</button>
                   </div>
+                </div>
+                <div style={{ marginTop: 16, textAlign: 'center' }}>
+                  <button style={{ background: '#22c55e', color: '#fff', border: 'none', borderRadius: 4, padding: '6px 24px', fontWeight: 'bold', fontSize: 16 }} onClick={resolveConflictWithMerge}>両方マージして保存</button>
                 </div>
               </div>
             )}
