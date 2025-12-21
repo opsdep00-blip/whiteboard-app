@@ -1348,7 +1348,7 @@ export default function HomePage() {
   }, [pendingConflict, currentOwnerId]);
 
   const resolveConflictWithLocal = useCallback(async () => {
-    if (!pendingConflict || !firebaseUser || !currentOwnerId) return;
+    if (!pendingConflict || !currentOwnerId) return;
     try {
       if (pendingConflict.kind === "project") {
         const local = pendingConflict.local as Project;
@@ -4304,7 +4304,7 @@ export default function HomePage() {
         </div>
       )}
 
-      {pendingConflict && (
+              {pendingConflict && !isDataSyncing && (
         <div
           role="presentation"
           onClick={() => setPendingConflict(null)}
