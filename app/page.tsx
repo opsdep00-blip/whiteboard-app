@@ -1333,31 +1333,26 @@ export default function HomePage() {
   const resolveConflictWithLocal = useCallback(async () => {
     if (!pendingConflict || !currentOwnerId) return;
     try {
+      let saved: Project | Page | null = null;
       if (pendingConflict.kind === "project") {
         const local = pendingConflict.local as Project;
-        const remoteVersion = typeof (pendingConflict.remote as Project).version === "number" ? (pendingConflict.remote as Project).version : 0;
+        // Firestoreから最新versionを取得
+        const remote = await fetchRemoteProject(local.id);
+        const remoteVersion = remote && typeof remote.version === "number" ? remote.version : 0;
         const next = { ...local, version: remoteVersion, updatedAt: nowIso() };
         await persistProjectWithVersion(next, currentOwnerId);
+        saved = await fetchRemoteProject(local.id);
+        setProjects((prev) => prev.map((p) => p.id === local.id && saved && "name" in saved ? saved as Project : p));
       } else {
         const local = pendingConflict.local as Page;
-        const remoteVersion = typeof (pendingConflict.remote as Page).version === "number" ? (pendingConflict.remote as Page).version : 0;
+        // Firestoreから最新versionを取得
+        const remote = await fetchRemotePage(local.id);
+        const remoteVersion = remote && typeof remote.version === "number" ? remote.version : 0;
         const next = { ...local, version: remoteVersion, updatedAt: nowIso() } as Page;
         await persistPageWithVersion(next, currentOwnerId);
+        saved = await fetchRemotePage(local.id);
+        setPages((prev) => prev.map((p) => p.id === local.id && saved && "title" in saved ? saved as Page : p));
       }
-      // Firestoreから最新データを再取得し、競合IDはlocalで上書き
-      const updatedProjectsSnap = await getDocs(query(collection(db, "projects"), where("owner", "==", currentOwnerId)));
-      let updatedProjects = updatedProjectsSnap.docs.map((docSnap) => ({ ...docSnap.data(), id: docSnap.id } as Project));
-      const updatedPagesSnap = await getDocs(query(collection(db, "pages"), where("owner", "==", currentOwnerId)));
-      let updatedPages = updatedPagesSnap.docs.map((docSnap) => ({ ...docSnap.data(), id: docSnap.id } as Page));
-      if (pendingConflict.kind === "project") {
-        const local = pendingConflict.local as Project;
-        updatedProjects = updatedProjects.map(p => p.id === local.id ? { ...local, version: p.version, updatedAt: p.updatedAt } : p);
-      } else {
-        const local = pendingConflict.local as Page;
-        updatedPages = updatedPages.map(p => p.id === local.id ? { ...local, version: p.version, updatedAt: p.updatedAt } : p);
-      }
-      setProjects(updatedProjects);
-      setPages(updatedPages);
       setPendingConflict(null);
       setDataMessage("ローカルの内容で上書きしました");
     } catch (error) {
