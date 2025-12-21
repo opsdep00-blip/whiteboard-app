@@ -463,9 +463,14 @@ export default function HomePage() {
     return `local_${btoa(encodeURIComponent(account.name + ':' + account.key))}`;
   };
   const currentOwnerId = useMemo(() => {
-    if (firebaseUser?.uid) return firebaseUser.uid;
-    if (localAccount) return getLocalAccountOwnerId(localAccount);
-    return null;
+    let id = null;
+    if (firebaseUser?.uid) id = firebaseUser.uid;
+    else if (localAccount) id = getLocalAccountOwnerId(localAccount);
+    // デバッグ用: ログイン時のownerIdを出力
+    if (id) {
+      console.log("[DEBUG] currentOwnerId:", id);
+    }
+    return id;
   }, [firebaseUser?.uid, localAccount]);
   const lastPersistedProjectsRef = useRef<Project[]>(initialProjects);
   const lastPersistedPagesRef = useRef<Page[]>(INITIAL_PAGES_FOR_DEFAULT_PROJECT);
