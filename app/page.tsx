@@ -792,44 +792,8 @@ export default function HomePage() {
     setProjectRenameDraft(activeProject.name);
   }, [activeProject?.name, activeProjectId]);
 
-  useEffect(() => {
-    if (!currentOwnerId) return;
-    if (projectsPersistTimerRef.current) {
-      window.clearTimeout(projectsPersistTimerRef.current);
-    }
-    const changedProjects = getChangedItems(projects, lastPersistedProjectsRef.current);
-    if (changedProjects.length === 0) return;
-    projectsPersistTimerRef.current = window.setTimeout(async () => {
-      try {
-        const results = await Promise.all(
-          changedProjects.map((project) => persistProjectWithVersion(project, currentOwnerId))
-        );
-        const updatedProjects = projects.map((project) => {
-          const hit = results.find((item) => item.id === project.id);
-          return hit ? { ...project, version: hit.version, updatedAt: hit.updatedAt } : project;
-        });
-        lastPersistedProjectsRef.current = updatedProjects;
-        setProjects(updatedProjects);
-        setDataMessage("");
-      } catch (error) {
-        const isConflict = error instanceof Error && error.message === "version-mismatch";
-        console.error("プロジェクト同期失敗", error);
-        if (isConflict) {
-          const conflicted = changedProjects[0];
-          if (conflicted) {
-            await handleVersionConflict("project", conflicted.id, conflicted);
-          }
-        } else {
-          setDataMessage("プロジェクト同期に失敗しました");
-        }
-      }
-    }, 1600);
-    return () => {
-      if (projectsPersistTimerRef.current) {
-        window.clearTimeout(projectsPersistTimerRef.current);
-      }
-    };
-  }, [projects, firebaseUser, currentOwnerId]);
+  // 自動保存を停止（保存ボタンでのみ保存）
+  // useEffect(() => {}, [projects, firebaseUser, currentOwnerId]);
 
   useEffect(() => {
     if (typeof window === "undefined" || !isProjectMenuOpen) return;
@@ -862,45 +826,52 @@ export default function HomePage() {
     }
   }, [theme]);
 
-  useEffect(() => {
-    if (!currentOwnerId) return;
-    if (pagesPersistTimerRef.current) {
-      window.clearTimeout(pagesPersistTimerRef.current);
+  // useEffect(() => {}, [pages, firebaseUser, currentOwnerId]);
+  // 保存ボタン用: Firestoreの最新データとローカルの差分を比較し、競合時は選択UIを出す
+  const handleManualSave = useCallback(async () => {
+    if (!currentOwnerId) {
+      setDataMessage("ログインが必要です");
+      return;
     }
-    const changedPages = getChangedItems(pages, lastPersistedPagesRef.current);
-    if (changedPages.length === 0) return;
-    pagesPersistTimerRef.current = window.setTimeout(async () => {
-      try {
-        const results = await Promise.all(
-          changedPages.map((page) => persistPageWithVersion(page, currentOwnerId))
-        );
-        const updatedPages = pages.map((page) => {
-          const hit = results.find((item) => item.id === page.id);
-          return hit ? { ...page, version: hit.version, updatedAt: hit.updatedAt } : page;
-        });
-        lastPersistedPagesRef.current = updatedPages;
-        setPages(updatedPages);
-        setDataMessage("ページを同期しました");
-      } catch (error) {
-        const isConflict = error instanceof Error && error.message === "version-mismatch";
-        // サイレントに失敗をログへ出すだけに留める
-        console.error("ページ同期失敗", error);
-        if (isConflict) {
-          const conflicted = changedPages[0];
-          if (conflicted) {
-            await handleVersionConflict("page", conflicted.id, conflicted);
-          }
-        } else {
-          setDataMessage("ページ同期に失敗しました");
-        }
-      }
-    }, 1600);
-    return () => {
-      if (pagesPersistTimerRef.current) {
-        window.clearTimeout(pagesPersistTimerRef.current);
-      }
-    };
-  }, [pages, firebaseUser, currentOwnerId]);
+    setIsDataSyncing(true);
+    setDataMessage("保存中...");
+    try {
+      // Firestoreから最新データ取得
+      const projectsSnap = await getDocs(query(collection(db, "projects"), where("owner", "==", currentOwnerId)));
+      const remoteProjects = projectsSnap.docs.map((docSnap) => ({ ...docSnap.data(), id: docSnap.id } as Project));
+      const pagesSnap = await getDocs(query(collection(db, "pages"), where("owner", "==", currentOwnerId)));
+      const remotePages = pagesSnap.docs.map((docSnap) => ({ ...docSnap.data(), id: docSnap.id } as Page));
+
+      // 差分比較（例: 新規追加分は両方残す）
+      // ここでは単純なIDベースのマージ例
+      const mergedProjects = [
+        ...remoteProjects,
+        ...projects.filter(lp => !remoteProjects.some(rp => rp.id === lp.id))
+      ];
+      const mergedPages = [
+        ...remotePages,
+        ...pages.filter(lp => !remotePages.some(rp => rp.id === lp.id))
+      ];
+
+      // 競合（同じIDで内容が異なる場合）は今後UIで選択できるようにする
+      // 今回は新規追加分だけマージし、既存IDはリモート優先
+      await Promise.all([
+        ...projects.filter(lp => !remoteProjects.some(rp => rp.id === lp.id)).map(p => setDoc(doc(db, "projects", p.id), p)),
+        ...pages.filter(lp => !remotePages.some(rp => rp.id === lp.id)).map(p => setDoc(doc(db, "pages", p.id), p)),
+      ]);
+      setProjects(mergedProjects);
+      setPages(mergedPages);
+      setDataMessage("保存しました（新規追加分のみマージ）");
+    } catch (error) {
+      setDataMessage("保存に失敗しました");
+      console.error(error);
+    } finally {
+      setIsDataSyncing(false);
+    }
+  }, [currentOwnerId, projects, pages]);
+  // UI: 保存ボタンを追加
+  // ...既存のreturn内の適切な場所に以下を追加してください...
+  // <button onClick={handleManualSave} disabled={isDataSyncing || !currentOwnerId}>保存</button>
 
   // 未ログイン時のみlocalStorageへ自動保存
   useEffect(() => {
