@@ -4024,28 +4024,39 @@ export default function HomePage() {
               {isDataSyncing && <span style={{ color: '#1976d2' }}>保存中...</span>}
             </div>
             {pendingConflict && (
-              <div style={{ background: '#fffbe6', border: '1px solid #ffe58f', padding: 16, margin: '12px 0', borderRadius: 6 }}>
-                <div style={{ fontWeight: 'bold', marginBottom: 8 }}>競合が発生しました</div>
-                <div style={{ marginBottom: 8 }}>
-                  他の人が同じデータを編集・保存したため、内容が競合しています。<br />
-                  どちらの内容を採用するか、または両方マージして保存できます。
-                </div>
-                <div style={{ display: 'flex', gap: 16 }}>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontWeight: 'bold', marginBottom: 4 }}>あなたの編集内容</div>
-                    <pre style={{ background: '#f5f5f5', padding: 8, borderRadius: 4, maxHeight: 180, overflow: 'auto' }}>{JSON.stringify(pendingConflict.local, null, 2)}</pre>
-                    <button style={{ marginTop: 8, background: '#1976d2', color: '#fff', border: 'none', borderRadius: 4, padding: '4px 12px' }} onClick={resolveConflictWithLocal}>自分の内容で上書き</button>
+                <div style={{ background: '#fffbe6', border: '1px solid #ffe58f', padding: 16, margin: '12px 0', borderRadius: 6 }}>
+                  <div style={{ fontWeight: 'bold', marginBottom: 8 }}>競合が発生しました</div>
+                  <div style={{ marginBottom: 8 }}>
+                    他の人が同じデータを編集・保存したため、内容が競合しています。どちらか、または両方マージして保存できます。
                   </div>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontWeight: 'bold', marginBottom: 4 }}>他の人の内容（最新）</div>
-                    <pre style={{ background: '#f5f5f5', padding: 8, borderRadius: 4, maxHeight: 180, overflow: 'auto' }}>{JSON.stringify(pendingConflict.remote, null, 2)}</pre>
-                    <button style={{ marginTop: 8, background: '#888', color: '#fff', border: 'none', borderRadius: 4, padding: '4px 12px' }} onClick={resolveConflictWithRemote}>他の人の内容を採用</button>
+                  <div style={{ display: 'flex', gap: 16 }}>
+                    <div style={{ flex: 1, background: '#f5f5f5', borderRadius: 4, padding: 8 }}>
+                      <div style={{ fontWeight: 'bold', marginBottom: 4 }}>あなたの編集内容</div>
+                      <div>タイトル: {(pendingConflict.local as any).title || (pendingConflict.local as any).name}</div>
+                      {typeof (pendingConflict.local as any).content === 'string' && <div>内容: {(pendingConflict.local as any).content.slice(0, 60)}...</div>}
+                      {Array.isArray((pendingConflict.local as any).cards) && <div>Q&A数: {(pendingConflict.local as any).cards.length}</div>}
+                      {Array.isArray((pendingConflict.local as any).items) && <div>ランキング項目数: {(pendingConflict.local as any).items.length}</div>}
+                      {Array.isArray((pendingConflict.local as any).nodes) && <div>ノード数: {(pendingConflict.local as any).nodes.length}</div>}
+                      <button style={{ marginTop: 8, background: '#1976d2', color: '#fff', border: 'none', borderRadius: 4, padding: '4px 12px' }} onClick={resolveConflictWithLocal}>自分の内容で上書き</button>
+                    </div>
+                    <div style={{ flex: 1, background: '#f5f5f5', borderRadius: 4, padding: 8 }}>
+                      <div style={{ fontWeight: 'bold', marginBottom: 4 }}>他の人の内容（最新）</div>
+                      <div>タイトル: {(pendingConflict.remote as any).title || (pendingConflict.remote as any).name}</div>
+                      {typeof (pendingConflict.remote as any).content === 'string' && <div>内容: {(pendingConflict.remote as any).content.slice(0, 60)}...</div>}
+                      {Array.isArray((pendingConflict.remote as any).cards) && <div>Q&A数: {(pendingConflict.remote as any).cards.length}</div>}
+                      {Array.isArray((pendingConflict.remote as any).items) && <div>ランキング項目数: {(pendingConflict.remote as any).items.length}</div>}
+                      {Array.isArray((pendingConflict.remote as any).nodes) && <div>ノード数: {(pendingConflict.remote as any).nodes.length}</div>}
+                      <button style={{ marginTop: 8, background: '#888', color: '#fff', border: 'none', borderRadius: 4, padding: '4px 12px' }} onClick={resolveConflictWithRemote}>他の人の内容を採用</button>
+                    </div>
+                  </div>
+                  <div style={{ marginTop: 16, textAlign: 'center' }}>
+                    <button style={{ background: '#22c55e', color: '#fff', border: 'none', borderRadius: 4, padding: '6px 24px', fontWeight: 'bold', fontSize: 16 }} onClick={resolveConflictWithMerge}>両方マージして保存</button>
                   </div>
                 </div>
-                <div style={{ marginTop: 16, textAlign: 'center' }}>
-                  <button style={{ background: '#22c55e', color: '#fff', border: 'none', borderRadius: 4, padding: '6px 24px', fontWeight: 'bold', fontSize: 16 }} onClick={resolveConflictWithMerge}>両方マージして保存</button>
-                </div>
-              </div>
+              )}
+              // useEffect(() => {}, [projects, firebaseUser, currentOwnerId]);
+              // useEffect(() => {}, [pages, firebaseUser, currentOwnerId]);
+              // useEffect(() => {}, [projects, pages, activeProjectId, activePageId, firebaseUser, localAccount, persistLocalData]);
             )}
             <div
               style={{
