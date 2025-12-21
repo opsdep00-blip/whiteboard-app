@@ -2355,9 +2355,9 @@ export default function HomePage() {
                   flexWrap: "wrap",
                   gap: 12,
                   alignItems: "center",
-              minWidth: 0
-            }}
-          >
+                  minWidth: 0
+                }}
+              >
             <label style={{ display: "flex", flexDirection: "column", fontSize: 12, gap: 4 }}>
               <span style={{ opacity: 0.8 }}>ヘッダータイトル</span>
               <input
