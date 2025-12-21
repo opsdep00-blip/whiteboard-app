@@ -1189,9 +1189,9 @@ export default function HomePage() {
     setIsAccountModalOpen(false);
     // Firestore初期化（データ取得 or 新規作成）
     setTimeout(() => {
-      // currentOwnerIdはuseMemoなので即時反映されない場合があるため、少し遅延
+      // currentOwnerIdはuseMemoなので即時反映されない場合があるため、十分遅延
       window.location.reload(); // 状態を確実に反映させるためリロード
-    }, 300);
+    }, 1000);
     setIsAuthSigningIn(false);
   }, [isAuthSigningIn, accountNameInput, accountKeyInput]);
 
