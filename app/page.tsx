@@ -636,23 +636,7 @@ export default function HomePage() {
     return unsubscribe;
   }, []);
 
-  useEffect(() => {
-    if (typeof document === "undefined") return;
-    const handleVisibility = () => {
-      if (document.visibilityState === "hidden") {
-        void flushPersist();
-      }
-    };
-    const handleBeforeUnload = () => {
-      void flushPersist();
-    };
-    document.addEventListener("visibilitychange", handleVisibility);
-    window.addEventListener("beforeunload", handleBeforeUnload);
-    return () => {
-      document.removeEventListener("visibilitychange", handleVisibility);
-      window.removeEventListener("beforeunload", handleBeforeUnload);
-    };
-  }, [flushPersist]);
+  // 保存ボタン以外でFirestoreへ書き込まないように自動保存イベントを削除
 
   useEffect(() => {
     if (typeof window === "undefined") return;
