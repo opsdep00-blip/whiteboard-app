@@ -1,3 +1,4 @@
+import { deleteDoc } from "firebase/firestore";
 
 "use client";
 
@@ -1307,9 +1308,19 @@ export default function HomePage() {
       const newIdRemote = remotePage.id + "_merge_remote_" + now;
       const newPageLocal = { ...localPage, id: newIdLocal, title: (localPage.title || "") + " (マージ:自分)" };
       const newPageRemote = { ...remotePage, id: newIdRemote, title: (remotePage.title || "") + " (マージ:他)" };
-      await persistPageWithVersion(newPageLocal, currentOwnerId);
-      await persistPageWithVersion(newPageRemote, currentOwnerId);
-      setPages((prev) => [...prev, newPageLocal, newPageRemote]);
+      await Promise.all([
+        persistPageWithVersion(newPageLocal, currentOwnerId),
+        persistPageWithVersion(newPageRemote, currentOwnerId)
+      ]);
+      setPages((prev) => {
+        // 既存IDのページはそのまま、新規2つだけ追加（重複防止）
+        const ids = new Set([newPageLocal.id, newPageRemote.id]);
+        return [
+          ...prev.filter(p => !ids.has(p.id)),
+          newPageLocal,
+          newPageRemote
+        ];
+      });
       setPendingConflict(null);
       setDataMessage("両方の内容を別ページとして保存しました");
       return;
@@ -1554,6 +1565,11 @@ export default function HomePage() {
   );
 
   const handleDeletePage = useCallback(
+        // Firestoreからも削除
+        if (currentOwnerId) {
+          const ref = doc(db, "pages", pageId);
+          deleteDoc(ref).catch((e) => console.error("Firestoreページ削除失敗", e));
+        }
     (pageId: string) => {
       setPages((prev) => {
         const next = prev.filter((page) => page.id !== pageId);
@@ -2686,49 +2702,56 @@ export default function HomePage() {
                 }
 
                 // 接続先の位置と値を取得
-                if (link.to.textBoxId) {
-                  const toTextBox = page.textBoxes?.find((tb) => tb.id === link.to.textBoxId);
-                  if (!toTextBox) return null;
-                  toPos = getTextBoxAnchorPosition(toTextBox, link.to.side as "left" | "right");
-                  toValue = toTextBox.value;
-                } else if (link.to.nodeId && link.to.sectionId) {
-                  const toNode = page.nodes.find((node) => node.id === link.to.nodeId);
-                  if (!toNode) return null;
-                  const toSection = toNode.sections.find((section) => section.id === link.to.sectionId);
-                  if (!toSection) return null;
-                  toPos = getSectionAnchorPosition(toNode, toSection, link.to.side ?? "left");
-                  toValue = toNode.value;
+                if (currentOwnerId) {
+                  if (pendingConflict) {
+                    setDataMessage("競合解決中です。選択が終わるまで保存できません。");
+                    return;
+                  }
+                  const changedProjects = getChangedItems(projects, lastPersistedProjectsRef.current);
+                  const changedPages = getChangedItems(pages, lastPersistedPagesRef.current);
+                  // Firestore上の全ページIDを取得
+                  const remoteSnap = await getDocs(query(collection(db, "pages"), where("owner", "==", currentOwnerId)));
+                  const remoteIds = new Set(remoteSnap.docs.map(doc => doc.id));
+                  const localIds = new Set(pages.map(p => p.id));
+                  // ローカルに存在しないIDはFirestoreから削除
+                  const deletedIds = Array.from(remoteIds).filter(id => !localIds.has(id));
+                  await Promise.all(deletedIds.map(id => deleteDoc(doc(db, "pages", id))));
+                  if (changedProjects.length === 0 && changedPages.length === 0 && deletedIds.length === 0) {
+                    return;
+                  }
+                  try {
+                    const [projectResults, pageResults] = await Promise.all([
+                      Promise.all(changedProjects.map((project) => persistProjectWithVersion(project, currentOwnerId))),
+                      Promise.all(changedPages.map((page) => persistPageWithVersion(page, currentOwnerId)))
+                    ]);
+                    const updatedProjects = projects.map((project) => {
+                      const hit = projectResults.find((item) => item.id === project.id);
+                      return hit ? { ...project, version: hit.version, updatedAt: hit.updatedAt } : project;
+                    });
+                    const updatedPages = pages.map((page) => {
+                      const hit = pageResults.find((item) => item.id === page.id);
+                      return hit ? { ...page, version: hit.version, updatedAt: hit.updatedAt } : page;
+                    });
+                    lastPersistedProjectsRef.current = updatedProjects;
+                    lastPersistedPagesRef.current = updatedPages;
+                    setProjects(updatedProjects);
+                    setPages(updatedPages);
+                  } catch (error) {
+                    const isConflict = error instanceof Error && error.message === "version-mismatch";
+                    if (isConflict) {
+                      const target = changedProjects[0] ?? changedPages[0];
+                      if (target) {
+                        await handleVersionConflict(isProjectEntity(target) ? "project" : "page", target.id, target as any);
+                        setDataMessage("競合が発生しました。選択が終わるまで保存できません。");
+                        return;
+                      }
+                    } else {
+                      setDataMessage("即時保存に失敗しました");
+                    }
+                    console.error("即時保存に失敗しました", error);
+                  }
+                  return;
                 }
-
-                if (!fromPos || !toPos) return null;
-
-                // メモが関わっている場合は、パネル側の値のみを使用
-                let strokeWidth: number;
-                if (link.from.textBoxId) {
-                  // メモ→パネル：接続先（パネル）の値を使用
-                  const toNode = page.nodes.find((node) => node.id === link.to.nodeId);
-                  strokeWidth = toNode ? 1 + (toNode.value / 100) * 12 : 7;
-                } else if (link.to.textBoxId) {
-                  // パネル→メモ：接続元（パネル）の値を使用
-                  const fromNode = page.nodes.find((node) => node.id === link.from.nodeId);
-                  strokeWidth = fromNode ? 1 + (fromNode.value / 100) * 12 : 7;
-                } else {
-                  // パネル→パネル：平均値を使用（元の動作）
-                  const fromStrokeWidth = 1 + (fromValue / 100) * 12;
-                  const toStrokeWidth = 1 + (toValue / 100) * 12;
-                  strokeWidth = (fromStrokeWidth + toStrokeWidth) / 2;
-                }
-
-                // グロウ強度とセグメント計算
-                const avgValue = (fromValue + toValue) / 2;
-                const glowIntensity = avgValue / 100;
-
-                // 線を10セグメントに分割してグラデーション効果を作る
-                const segments = 10;
-                const lineSegments = [];
-                const isTextBoxInvolved = link.from.textBoxId || link.to.textBoxId;
-                
-                for (let i = 0; i < segments; i++) {
                   const t1 = i / segments;
                   const t2 = (i + 1) / segments;
                   const x1 = fromPos.x + (toPos.x - fromPos.x) * t1;
