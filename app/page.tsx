@@ -1298,7 +1298,7 @@ export default function HomePage() {
   const resolveConflictWithMerge = useCallback(async () => {
     if (!pendingConflict || !currentOwnerId) return;
     const { kind, local, remote } = pendingConflict;
-    // 企画書（proposal）やダイアログ（qa）は両方マージ時、ローカル・リモート両方を新規ページとして保存
+    // 企画書（proposal）やダイアログ（qa）は両方マージ時、既存ページは上書きせず新規ページ2つのみ保存
     if (kind === "page" && ((local as any).boardId === "proposal" || (local as any).boardId === "qa")) {
       const localPage = local as Page;
       const remotePage = remote as Page;
