@@ -2358,6 +2358,8 @@ export default function HomePage() {
                   minWidth: 0
                 }}
               >
+    );
+  }
             <label style={{ display: "flex", flexDirection: "column", fontSize: 12, gap: 4 }}>
               <span style={{ opacity: 0.8 }}>ヘッダータイトル</span>
               <input
