@@ -1298,20 +1298,22 @@ export default function HomePage() {
   const resolveConflictWithMerge = useCallback(async () => {
     if (!pendingConflict || !currentOwnerId) return;
     const { kind, local, remote } = pendingConflict;
-    // 差分が大きい場合は新規ページとして両方残す
-    if (kind === "page" && isLargeDifference(local, remote)) {
+    // 企画書（proposal）やダイアログ（qa）は両方マージ時、ローカル・リモート両方を新規ページとして保存
+    if (kind === "page" && ((local as any).boardId === "proposal" || (local as any).boardId === "qa")) {
       const localPage = local as Page;
       const remotePage = remote as Page;
-      const newId = localPage.id + "_copy_" + Date.now();
-      const newPage = { ...localPage, id: newId, title: (localPage.title || "") + " (コピー)" };
-      await persistPageWithVersion(newPage, currentOwnerId);
-      setPages((prev) => [...prev, newPage]);
-      // 既存ページはリモートで上書き
-      await persistPageWithVersion(remotePage, currentOwnerId);
-      setPages((prev) => prev.map((p) => p.id === remotePage.id ? remotePage : p));
+      const now = Date.now();
+      const newIdLocal = localPage.id + "_merge_local_" + now;
+      const newIdRemote = remotePage.id + "_merge_remote_" + now;
+      const newPageLocal = { ...localPage, id: newIdLocal, title: (localPage.title || "") + " (マージ:自分)" };
+      const newPageRemote = { ...remotePage, id: newIdRemote, title: (remotePage.title || "") + " (マージ:他)" };
+      await persistPageWithVersion(newPageLocal, currentOwnerId);
+      await persistPageWithVersion(newPageRemote, currentOwnerId);
+      setPages((prev) => [...prev, newPageLocal, newPageRemote]);
       setPendingConflict(null);
-      setDataMessage("大きな差分があったため両方のバージョンを残しました");
+      setDataMessage("両方の内容を別ページとして保存しました");
       return;
+    }
     }
     let merged: any = {};
     if (kind === "project") {
