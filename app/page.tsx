@@ -1291,17 +1291,13 @@ export default function HomePage() {
     if (kind === "project") {
       // projectは基本的にlocal優先
       merged = { ...remote, ...local };
-    } else {
-      // page: Q&A, ランキング, mindmap など
+    } else if (kind === "page") {
       const base = { ...remote, ...local };
-      // Q&A
-      if (base.boardId === "qa") {
+      if ((base as any).boardId === "qa") {
         const localCards = (local as any).cards || [];
         const remoteCards = (remote as any).cards || [];
-        // カードIDでユニークにマージ
         const allCards = [...localCards, ...remoteCards];
         const mergedCards = Array.from(new Map(allCards.map(card => [card.id, card])).values());
-        // 各カードのanswersもIDでマージ
         mergedCards.forEach((card, idx) => {
           const localCard = localCards.find((c: any) => c.id === card.id);
           const remoteCard = remoteCards.find((c: any) => c.id === card.id);
@@ -1312,15 +1308,13 @@ export default function HomePage() {
         });
         base.cards = mergedCards;
       }
-      // ランキング
-      if (base.boardId === "ranking") {
+      if ((base as any).boardId === "ranking") {
         const localItems = (local as any).items || [];
         const remoteItems = (remote as any).items || [];
         const allItems = [...localItems, ...remoteItems];
         base.items = Array.from(new Map(allItems.map(item => [item.id, item])).values());
       }
-      // mindmap
-      if (base.boardId === "mindmap") {
+      if ((base as any).boardId === "mindmap") {
         const localNodes = (local as any).nodes || [];
         const remoteNodes = (remote as any).nodes || [];
         const allNodes = [...localNodes, ...remoteNodes];
