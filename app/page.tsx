@@ -1306,23 +1306,23 @@ export default function HomePage() {
             mergedCards[idx].answers = Array.from(new Map(allAnswers.map(ans => [ans.id, ans])).values());
           }
         });
-        base.cards = mergedCards;
+        (base as any).cards = mergedCards;
       }
       if ((base as any).boardId === "ranking") {
         const localItems = (local as any).items || [];
         const remoteItems = (remote as any).items || [];
         const allItems = [...localItems, ...remoteItems];
-        base.items = Array.from(new Map(allItems.map(item => [item.id, item])).values());
+        (base as any).items = Array.from(new Map(allItems.map(item => [item.id, item])).values());
       }
       if ((base as any).boardId === "mindmap") {
         const localNodes = (local as any).nodes || [];
         const remoteNodes = (remote as any).nodes || [];
         const allNodes = [...localNodes, ...remoteNodes];
-        base.nodes = Array.from(new Map(allNodes.map(node => [node.id, node])).values());
+        (base as any).nodes = Array.from(new Map(allNodes.map(node => [node.id, node])).values());
         const localTextBoxes = (local as any).textBoxes || [];
         const remoteTextBoxes = (remote as any).textBoxes || [];
         const allTextBoxes = [...localTextBoxes, ...remoteTextBoxes];
-        base.textBoxes = Array.from(new Map(allTextBoxes.map(tb => [tb.id, tb])).values());
+        (base as any).textBoxes = Array.from(new Map(allTextBoxes.map(tb => [tb.id, tb])).values());
       }
       merged = base;
     }
