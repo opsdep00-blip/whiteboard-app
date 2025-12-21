@@ -18,6 +18,7 @@ import { savePreviewPayload } from "../lib/previewStorage";
 
 type Theme = "dark" | "light";
 const THEME_STORAGE_KEY = "whiteboard-theme";
+const LOCAL_DATA_PREFIX = "whiteboard-local-data";
 
 type BoardType = "proposal" | "mindmap" | "ranking" | "qa";
 
@@ -33,6 +34,7 @@ type MarkdownPage = {
   boardId: "proposal";
   title: string;
   projectId: string;
+  owner?: string;
   content: string;
 };
 
@@ -80,6 +82,7 @@ type MindmapPage = {
   boardId: "mindmap";
   title: string;
   projectId: string;
+  owner?: string;
   nodes: MindmapNode[];
   textBoxes?: MindmapTextBox[];
   links: MindmapLink[];
@@ -96,6 +99,7 @@ type RankingPage = {
   boardId: "ranking";
   title: string;
   projectId: string;
+  owner?: string;
   items: RankingItem[];
   note?: string;
 };
@@ -119,6 +123,7 @@ type QAPage = {
   boardId: "qa";
   title: string;
   projectId: string;
+  owner?: string;
   cards: QACard[];
 };
 
@@ -127,11 +132,19 @@ type Page = MarkdownPage | MindmapPage | RankingPage | QAPage;
 type Project = {
   id: string;
   name: string;
+  owner?: string;
 };
 
 type LocalAccount = {
   name: string;
   key: string;
+};
+
+type LocalPersistedData = {
+  projects: Project[];
+  pages: Page[];
+  activeProjectId: string;
+  activePageId: string;
 };
 
 const boards: Board[] = [
@@ -242,12 +255,24 @@ const createId = (prefix: string) =>
     ? crypto.randomUUID()
     : `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
+const getLocalAccountDataKey = (account: LocalAccount) =>
+  `${LOCAL_DATA_PREFIX}:${account.name}:${account.key}`;
+
+const getChangedItems = <T extends { id: string }>(current: T[], last: T[]) => {
+  const lastMap = new Map(last.map((item) => [item.id, JSON.stringify(item)]));
+  return current.filter((item) => {
+    const serialized = JSON.stringify(item);
+    const prevSerialized = lastMap.get(item.id);
+    return !prevSerialized || prevSerialized !== serialized;
+  });
+};
+
 const createSection = (text: string): MindmapSection => ({
   id: createId("section"),
   text
 });
 
-const createRankingItem = (title: string, body: string = ""): RankingItem => ({
+const createRankingItem = (title: string = "", body: string = ""): RankingItem => ({
   id: createId("ranking"),
   title,
   body
@@ -258,56 +283,25 @@ const createMarkdownPage = (title: string, projectId: string): MarkdownPage => (
   boardId: "proposal",
   title,
   projectId,
-  content: markdownTemplate
-    .replace(PROJECT_TOKEN, title)
-    .replace(TIMESTAMP_TOKEN, new Date().toISOString())
+  content: ""
 });
 
-const createMindmapPage = (title: string, projectId: string): MindmapPage => {
-  const centerId = createId("node");
-  const branchA = createId("node");
-  const centerSections = [createSection("テーマ"), createSection("背景")];
-  const branchASections = [createSection("課題")];
-  return {
-    id: createId("mindmap"),
-    boardId: "mindmap",
-    title,
-    projectId,
-    nodes: [
-      {
-        id: centerId,
-        title: "パネル",
-        color: DEFAULT_NODE_COLOR,
-        value: 10,
-        x: 320,
-        y: 160,
-        sections: centerSections
-      },
-      {
-        id: branchA,
-        title: "課題",
-        color: DEFAULT_NODE_COLOR,
-        value: 10,
-        x: 120,
-        y: 80,
-        sections: branchASections
-        }
-    ],
-    textBoxes: [],
-      links: []
-  };
-};
+const createMindmapPage = (title: string, projectId: string): MindmapPage => ({
+  id: createId("mindmap"),
+  boardId: "mindmap",
+  title,
+  projectId,
+  nodes: [],
+  textBoxes: [],
+  links: []
+});
 
 const createRankingPage = (title: string, projectId: string): RankingPage => ({
   id: createId("ranking-page"),
   boardId: "ranking",
   title,
   projectId,
-  items: [
-    createRankingItem("最優先", ""),
-    createRankingItem("Priority 2", "ペンディング項目を洗い出す"),
-    createRankingItem("Priority 3", "最重要タスクを先頭に並べ替える")
-  ]
+  items: []
 });
 
 const createQAAnswer = (text: string): QAAnswer => ({
@@ -316,7 +310,7 @@ const createQAAnswer = (text: string): QAAnswer => ({
   createdAt: new Date().toISOString()
 });
 
-const createQACard = (title: string, description: string = "", answers: QAAnswer[] = []): QACard => ({
+const createQACard = (title: string = "", description: string = "", answers: QAAnswer[] = []): QACard => ({
   id: createId("qa-card"),
   title,
   description,
@@ -329,26 +323,12 @@ const createQAPage = (title: string, projectId: string): QAPage => ({
   boardId: "qa",
   title,
   projectId,
-  cards: [
-    createQACard(
-      "今のプロジェクトの不明点をどう整理すればいい？",
-      "チームからの質問や悩みを蓄積しておきたい。回答候補を自由に書けるようにしたい。",
-      [
-        createQAAnswer("質問の背景と期待する答えのイメージをそろえる"),
-        createQAAnswer("初期の回答をテンプレート化し、同僚に共有する")
-      ]
-    )
-  ],
+  cards: []
 });
 
-const createDefaultPagesForProject = (projectId: string): Page[] => [
-  createMarkdownPage("Markdown Canvas", projectId),
-  createMindmapPage("構造化マップ", projectId),
-  createRankingPage("やることメモ", projectId),
-  createQAPage("Q&A掲示板", projectId)
-];
+const createDefaultPagesForProject = (_projectId: string): Page[] => [];
 
-const INITIAL_PAGES_FOR_DEFAULT_PROJECT = createDefaultPagesForProject(DEFAULT_PROJECT_ID);
+const INITIAL_PAGES_FOR_DEFAULT_PROJECT: Page[] = [];
 
 const isMarkdownPage = (page: Page | null): page is MarkdownPage => !!page && page.boardId === "proposal";
 const isMindmapPage = (page: Page | null): page is MindmapPage => !!page && page.boardId === "mindmap";
@@ -364,6 +344,7 @@ export default function HomePage() {
   const [newProjectName, setNewProjectName] = useState("");
   const [projectRenameDraft, setProjectRenameDraft] = useState("");
   const [isProjectMenuOpen, setIsProjectMenuOpen] = useState(false);
+  const [isPageMenuOpen, setIsPageMenuOpen] = useState(false);
   const [activePageId, setActivePageId] = useState<string>(INITIAL_PAGES_FOR_DEFAULT_PROJECT[0]?.id ?? "");
   const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
   const [localAccount, setLocalAccount] = useState<LocalAccount | null>(null);
@@ -383,6 +364,53 @@ export default function HomePage() {
     return null;
   }, [firebaseUser?.displayName, firebaseUser?.email, localAccount?.name]);
   const isLoggedIn = !!firebaseUser || !!localAccount;
+  const currentOwnerId = useMemo(() => firebaseUser?.uid ?? null, [firebaseUser?.uid]);
+  const lastPersistedProjectsRef = useRef<Project[]>(initialProjects);
+  const lastPersistedPagesRef = useRef<Page[]>(INITIAL_PAGES_FOR_DEFAULT_PROJECT);
+  const persistLocalData = useCallback(() => {
+    if (firebaseUser || !localAccount) return;
+    if (typeof window === "undefined") return;
+    const payload: LocalPersistedData = {
+      projects,
+      pages,
+      activeProjectId,
+      activePageId
+    };
+    try {
+      window.localStorage.setItem(getLocalAccountDataKey(localAccount), JSON.stringify(payload));
+    } catch (error) {
+      console.error("ローカル保存に失敗しました", error);
+    }
+  }, [firebaseUser, localAccount, projects, pages, activeProjectId, activePageId]);
+
+  const flushPersist = useCallback(async () => {
+    if (firebaseUser && currentOwnerId) {
+      try {
+        const changedProjects = getChangedItems(projects, lastPersistedProjectsRef.current);
+        const changedPages = getChangedItems(pages, lastPersistedPagesRef.current);
+        if (changedProjects.length || changedPages.length) {
+          await Promise.all([
+            Promise.all(
+              changedProjects.map((project) =>
+                setDoc(doc(db, "projects", project.id), { ...project, owner: currentOwnerId })
+              )
+            ),
+            Promise.all(
+              changedPages.map((page) => setDoc(doc(db, "pages", page.id), { ...page, owner: currentOwnerId }))
+            )
+          ]);
+          lastPersistedProjectsRef.current = projects;
+          lastPersistedPagesRef.current = pages;
+        }
+      } catch (error) {
+        console.error("即時保存に失敗しました", error);
+      }
+      return;
+    }
+    if (!firebaseUser && localAccount) {
+      persistLocalData();
+    }
+  }, [firebaseUser, currentOwnerId, projects, pages, localAccount, persistLocalData]);
   const [linkingFrom, setLinkingFrom] = useState<MindmapConnector | null>(null);
   const [linkingCursor, setLinkingCursor] = useState<{ x: number; y: number } | null>(null);
   const [mindmapScale, setMindmapScale] = useState(1);
@@ -419,13 +447,23 @@ export default function HomePage() {
   const [isDataSyncing, setIsDataSyncing] = useState(false);
   const [dataMessage, setDataMessage] = useState("");
 
+  const resetToLocalDefaults = useCallback(() => {
+    setProjects(initialProjects);
+    setPages([]);
+    setActiveProjectId(DEFAULT_PROJECT_ID);
+    setActivePageId("");
+    setDataMessage("未ログイン: ローカル初期データを表示中");
+  }, []);
+
   const mindmapCanvasRef = useRef<HTMLDivElement | null>(null);
   const mindmapContainerRef = useRef<HTMLDivElement | null>(null);
   const editingTextBoxRefRef = useRef<HTMLTextAreaElement | null>(null);
   const panStartRef = useRef({ x: 0, y: 0 });
   const projectMenuRef = useRef<HTMLDivElement | null>(null);
+  const pageMenuRef = useRef<HTMLDivElement | null>(null);
   const projectsPersistTimerRef = useRef<number | null>(null);
   const pagesPersistTimerRef = useRef<number | null>(null);
+  const localPersistTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -450,6 +488,24 @@ export default function HomePage() {
     });
     return unsubscribe;
   }, []);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const handleVisibility = () => {
+      if (document.visibilityState === "hidden") {
+        void flushPersist();
+      }
+    };
+    const handleBeforeUnload = () => {
+      void flushPersist();
+    };
+    document.addEventListener("visibilitychange", handleVisibility);
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibility);
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+    };
+  }, [flushPersist]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -477,29 +533,32 @@ export default function HomePage() {
 
   useEffect(() => {
     const loadFromFirestore = async () => {
-      if (!firebaseUser) {
-        setProjects(initialProjects);
-        setPages(INITIAL_PAGES_FOR_DEFAULT_PROJECT);
-        setActiveProjectId(DEFAULT_PROJECT_ID);
-        setActivePageId(INITIAL_PAGES_FOR_DEFAULT_PROJECT[0]?.id ?? "");
-        setDataMessage("未ログイン: ローカル初期データを表示中");
+      if (!currentOwnerId) {
+        if (!localAccount) {
+          resetToLocalDefaults();
+        }
         return;
       }
       setIsDataSyncing(true);
       setDataMessage("Firestoreから読み込み中...");
+      setProjects([]);
+      setPages([]);
+      setActivePageId("");
       try {
-        const projectsSnap = await getDocs(collection(db, "projects"));
+        const projectsSnap = await getDocs(query(collection(db, "projects"), where("owner", "==", currentOwnerId)));
         const loadedProjects: Project[] = projectsSnap.docs.map((docSnap) => {
           const data = docSnap.data();
           return {
             id: docSnap.id,
-            name: typeof data.name === "string" ? data.name : "無題プロジェクト"
+            name: typeof data.name === "string" ? data.name : "無題プロジェクト",
+            owner: typeof data.owner === "string" ? data.owner : currentOwnerId
           } as Project;
         });
 
-        const nextProjects = loadedProjects.length > 0 ? loadedProjects : initialProjects;
+        const nextProjects = loadedProjects.length > 0
+          ? loadedProjects
+          : [{ id: DEFAULT_PROJECT_ID, name: "プロジェクトA", owner: currentOwnerId }];
         if (loadedProjects.length === 0) {
-          // 初回: デフォルトプロジェクトを保存（メンバーやUIDは持たせない）
           await Promise.all(
             nextProjects.map((project) => setDoc(doc(db, "projects", project.id), project))
           );
@@ -509,23 +568,18 @@ export default function HomePage() {
         const nextActiveProjectId = nextProjects[0]?.id ?? DEFAULT_PROJECT_ID;
         setActiveProjectId(nextActiveProjectId);
 
-        const pagesSnap = await getDocs(collection(db, "pages"));
+        lastPersistedProjectsRef.current = nextProjects;
+
+        const pagesSnap = await getDocs(query(collection(db, "pages"), where("owner", "==", currentOwnerId)));
         let loadedPages: Page[] = pagesSnap.docs
           .map((docSnap) => {
             const data = docSnap.data() as Page;
-            return { ...data, id: docSnap.id } as Page;
+            return { ...data, id: docSnap.id, owner: typeof (data as any).owner === "string" ? (data as any).owner : currentOwnerId } as Page;
           })
           .filter((page) => page && typeof (page as any).id === "string");
 
-        if (loadedPages.length === 0) {
-          const defaults = createDefaultPagesForProject(nextActiveProjectId);
-          loadedPages = defaults;
-          await Promise.all(
-            defaults.map((page) => setDoc(doc(db, "pages", page.id), page))
-          );
-        }
-
         setPages(loadedPages);
+        lastPersistedPagesRef.current = loadedPages;
         const nextActivePageId = loadedPages.find((p) => p.projectId === nextActiveProjectId)?.id ?? loadedPages[0]?.id ?? "";
         setActivePageId(nextActivePageId);
         setDataMessage("Firestore同期済み");
@@ -538,7 +592,43 @@ export default function HomePage() {
     };
 
     void loadFromFirestore();
-  }, [firebaseUser]);
+  }, [firebaseUser, currentOwnerId, localAccount, resetToLocalDefaults]);
+
+  useEffect(() => {
+    if (firebaseUser || !localAccount) return;
+    if (typeof window === "undefined") return;
+    const raw = window.localStorage.getItem(getLocalAccountDataKey(localAccount));
+    if (!raw) {
+      resetToLocalDefaults();
+      setDataMessage("ローカルアカウント: 初期データを作成しました");
+      return;
+    }
+    try {
+      const parsed = JSON.parse(raw) as Partial<LocalPersistedData>;
+      const nextProjects = Array.isArray(parsed.projects) && parsed.projects.length > 0 ? parsed.projects : initialProjects;
+      const nextPages = Array.isArray(parsed.pages) ? parsed.pages : [];
+      setProjects(nextProjects);
+      setPages(nextPages);
+      lastPersistedProjectsRef.current = nextProjects;
+      lastPersistedPagesRef.current = nextPages;
+      const nextActiveProjectId =
+        parsed.activeProjectId && nextProjects.some((project) => project.id === parsed.activeProjectId)
+          ? parsed.activeProjectId
+          : nextProjects[0]?.id ?? DEFAULT_PROJECT_ID;
+      setActiveProjectId(nextActiveProjectId);
+      const nextActivePageId =
+        parsed.activePageId &&
+        nextPages.some((page) => page.id === parsed.activePageId && page.projectId === nextActiveProjectId)
+          ? parsed.activePageId
+          : nextPages.find((page) => page.projectId === nextActiveProjectId)?.id ?? "";
+      setActivePageId(nextActivePageId);
+      setDataMessage("ローカルアカウントのデータを復元しました");
+    } catch (error) {
+      console.error("ローカルデータ復元に失敗しました", error);
+      resetToLocalDefaults();
+      setDataMessage("ローカルデータが壊れていたため初期化しました");
+    }
+  }, [firebaseUser, localAccount, resetToLocalDefaults]);
 
   useEffect(() => {
     if (!activeProject) {
@@ -549,24 +639,29 @@ export default function HomePage() {
   }, [activeProject?.name, activeProjectId]);
 
   useEffect(() => {
-    if (!firebaseUser) return;
+    if (!currentOwnerId) return;
     if (projectsPersistTimerRef.current) {
       window.clearTimeout(projectsPersistTimerRef.current);
     }
+    const changedProjects = getChangedItems(projects, lastPersistedProjectsRef.current);
+    if (changedProjects.length === 0) return;
     projectsPersistTimerRef.current = window.setTimeout(async () => {
       try {
-        await Promise.all(projects.map((project) => setDoc(doc(db, "projects", project.id), project)));
+        await Promise.all(
+          changedProjects.map((project) => setDoc(doc(db, "projects", project.id), { ...project, owner: currentOwnerId }))
+        );
+        lastPersistedProjectsRef.current = projects;
         setDataMessage("");
       } catch (error) {
         console.error("プロジェクト同期失敗", error);
       }
-    }, 800);
+    }, 1600);
     return () => {
       if (projectsPersistTimerRef.current) {
         window.clearTimeout(projectsPersistTimerRef.current);
       }
     };
-  }, [projects, firebaseUser]);
+  }, [projects, firebaseUser, currentOwnerId]);
 
   useEffect(() => {
     if (typeof window === "undefined" || !isProjectMenuOpen) return;
@@ -580,6 +675,17 @@ export default function HomePage() {
   }, [isProjectMenuOpen]);
 
   useEffect(() => {
+    if (typeof window === "undefined" || !isPageMenuOpen) return;
+    const handleClickOutside = (event: MouseEvent) => {
+      if (pageMenuRef.current && !pageMenuRef.current.contains(event.target as Node)) {
+        setIsPageMenuOpen(false);
+      }
+    };
+    window.addEventListener("mousedown", handleClickOutside);
+    return () => window.removeEventListener("mousedown", handleClickOutside);
+  }, [isPageMenuOpen]);
+
+  useEffect(() => {
     if (typeof document === "undefined") return;
     document.documentElement.dataset.theme = theme;
     document.documentElement.style.setProperty("color-scheme", theme);
@@ -589,25 +695,51 @@ export default function HomePage() {
   }, [theme]);
 
   useEffect(() => {
-    if (!firebaseUser) return;
+    if (!currentOwnerId) return;
     if (pagesPersistTimerRef.current) {
       window.clearTimeout(pagesPersistTimerRef.current);
     }
+    const changedPages = getChangedItems(pages, lastPersistedPagesRef.current);
+    if (changedPages.length === 0) return;
     pagesPersistTimerRef.current = window.setTimeout(async () => {
       try {
-        await Promise.all(pages.map((page) => setDoc(doc(db, "pages", page.id), page)));
+        await Promise.all(
+          changedPages.map((page) => setDoc(doc(db, "pages", page.id), { ...page, owner: currentOwnerId }))
+        );
+        lastPersistedPagesRef.current = pages;
         setDataMessage("ページを同期しました");
       } catch (error) {
         // サイレントに失敗をログへ出すだけに留める
         console.error("ページ同期失敗", error);
       }
-    }, 800);
+    }, 1600);
     return () => {
       if (pagesPersistTimerRef.current) {
         window.clearTimeout(pagesPersistTimerRef.current);
       }
     };
-  }, [pages, firebaseUser]);
+  }, [pages, firebaseUser, currentOwnerId]);
+
+  useEffect(() => {
+    if (firebaseUser || !localAccount) return;
+    if (typeof window === "undefined") return;
+    if (localPersistTimerRef.current) {
+      window.clearTimeout(localPersistTimerRef.current);
+    }
+    const changedProjects = getChangedItems(projects, lastPersistedProjectsRef.current);
+    const changedPages = getChangedItems(pages, lastPersistedPagesRef.current);
+    if (changedProjects.length === 0 && changedPages.length === 0) return;
+    localPersistTimerRef.current = window.setTimeout(() => {
+      persistLocalData();
+      lastPersistedProjectsRef.current = projects;
+      lastPersistedPagesRef.current = pages;
+    }, 400);
+    return () => {
+      if (localPersistTimerRef.current) {
+        window.clearTimeout(localPersistTimerRef.current);
+      }
+    };
+  }, [projects, pages, activeProjectId, activePageId, firebaseUser, localAccount, persistLocalData]);
 
   useEffect(() => {
     if (!isPanning) return;
@@ -748,6 +880,10 @@ export default function HomePage() {
   }, [activePage]);
 
   useEffect(() => {
+    setIsPageMenuOpen(false);
+  }, [selectedBoardId]);
+
+  useEffect(() => {
     if (!isQAPage(activePage)) {
       setSelectedQACardId(null);
       return;
@@ -769,6 +905,9 @@ export default function HomePage() {
       }
       if (pagesPersistTimerRef.current) {
         window.clearTimeout(pagesPersistTimerRef.current);
+      }
+      if (localPersistTimerRef.current) {
+        window.clearTimeout(localPersistTimerRef.current);
       }
     };
   }, []);
@@ -868,20 +1007,29 @@ export default function HomePage() {
 
   const handleAccountLogout = useCallback(() => {
     if (firebaseUser) {
-      signOut(auth)
-        .then(() => setAccountMessage("ログアウトしました"))
-        .catch((error) => {
-          const message = error instanceof Error ? error.message : String(error);
-          setAccountMessage(`ログアウトに失敗しました: ${message}`);
-        })
-        .finally(() => setIsAccountModalOpen(false));
+      flushPersist()
+        .finally(() =>
+          signOut(auth)
+            .then(() => setAccountMessage("ログアウトしました"))
+            .catch((error) => {
+              const message = error instanceof Error ? error.message : String(error);
+              setAccountMessage(`ログアウトに失敗しました: ${message}`);
+            })
+        )
+        .finally(() => {
+          resetToLocalDefaults();
+          setIsAccountModalOpen(false);
+        });
       return;
     }
-    setLocalAccount(null);
-    setActiveAccountId(null);
-    setAccountMessage("ログアウトしました");
-    setIsAccountModalOpen(false);
-  }, [firebaseUser]);
+    Promise.resolve(flushPersist()).finally(() => {
+      setLocalAccount(null);
+      setActiveAccountId(null);
+      setAccountMessage("ログアウトしました");
+      resetToLocalDefaults();
+      setIsAccountModalOpen(false);
+    });
+  }, [firebaseUser, flushPersist, resetToLocalDefaults]);
 
   const handleGoogleLogin = useCallback(async () => {
     if (isAuthSigningIn) return;
@@ -983,12 +1131,13 @@ export default function HomePage() {
   const handleAddProject = useCallback(() => {
     const trimmedName = newProjectName.trim();
     if (!trimmedName) return;
-    const newProject: Project = { id: createId("project"), name: trimmedName };
+    const newProject: Project = { id: createId("project"), name: trimmedName, owner: currentOwnerId ?? undefined };
     setProjects((prev) => [...prev, newProject]);
-    setPages((prev) => [...prev, ...createDefaultPagesForProject(newProject.id)]);
+    const defaults = createDefaultPagesForProject(newProject.id).map((page) => ({ ...page, owner: currentOwnerId ?? page.owner }));
+    setPages((prev) => [...prev, ...defaults]);
     setActiveProjectId(newProject.id);
     setNewProjectName("");
-  }, [newProjectName]);
+  }, [newProjectName, currentOwnerId]);
 
   const handleRenameProject = useCallback(() => {
     if (!activeProject) return;
@@ -1010,7 +1159,7 @@ export default function HomePage() {
   }, []);
 
   const handleAddPage = useCallback(() => {
-    const page =
+    const basePage =
       selectedBoardId === "proposal"
         ? createMarkdownPage("New Proposal", activeProjectId)
         : selectedBoardId === "qa"
@@ -1018,13 +1167,14 @@ export default function HomePage() {
         : selectedBoardId === "mindmap"
         ? createMindmapPage("New Mindmap", activeProjectId)
         : createRankingPage("New Ranking", activeProjectId);
+    const page = { ...basePage, owner: currentOwnerId ?? basePage.owner } as Page;
     setPages((prev) => [...prev, page]);
     setActivePageId(page.id);
-  }, [selectedBoardId, activeProjectId]);
+  }, [selectedBoardId, activeProjectId, currentOwnerId]);
 
 
   const handleAddQACard = useCallback(() => {
-    const newCard = createQACard("新しい質問", "質問や悩みをここに記入して、回答を募集できます。");
+    const newCard = createQACard();
     setPages((prev) =>
       prev.map((page) =>
         isQAPage(page) && page.id === activePageId
@@ -1073,6 +1223,26 @@ export default function HomePage() {
     setQaAnswerDraft("");
   }, [activePageId, qaAnswerDraft, selectedQACardId]);
 
+  const handleDeleteQAAnswer = useCallback(
+    (cardId: string, answerId: string) => {
+      setPages((prev) =>
+        prev.map((page) =>
+          isQAPage(page) && page.id === activePageId
+            ? {
+                ...page,
+                cards: page.cards.map((card) =>
+                  card.id === cardId
+                    ? { ...card, answers: card.answers.filter((ans) => ans.id !== answerId) }
+                    : card
+                )
+              }
+            : page
+        )
+      );
+    },
+    [activePageId]
+  );
+
   const handleDeletePage = useCallback(
     (pageId: string) => {
       setPages((prev) => {
@@ -1083,14 +1253,14 @@ export default function HomePage() {
         }
         return next;
       });
-      if (firebaseUser) {
+      if (currentOwnerId) {
         deleteDoc(doc(db, "pages", pageId)).catch((error) => {
           const message = error instanceof Error ? error.message : String(error);
           setDataMessage(`ページ削除失敗: ${message}`);
         });
       }
     },
-    [activePageId, selectedBoardId, firebaseUser]
+    [activePageId, selectedBoardId, currentOwnerId]
   );
 
   const handleTitleChange = useCallback(
@@ -1151,7 +1321,7 @@ export default function HomePage() {
   );
 
   const handleRankingAddItem = useCallback(() => {
-    const nextItem = createRankingItem("新しいカード", "");
+    const nextItem = createRankingItem("", "");
     setPages((prev) =>
       prev.map((page) =>
         isRankingPage(page) && page.id === activePageId ? { ...page, items: [nextItem, ...page.items] } : page
@@ -3032,7 +3202,24 @@ export default function HomePage() {
                         }}
                       >
                         <p style={{ margin: 0, whiteSpace: "pre-wrap" }}>{answer.text}</p>
-                        <span style={{ fontSize: 11, opacity: 0.6 }}>{new Date(answer.createdAt).toLocaleString()}</span>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, fontSize: 11, opacity: 0.6 }}>
+                          <span>{new Date(answer.createdAt).toLocaleString()}</span>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteQAAnswer(selectedCard.id, answer.id)}
+                            style={{
+                              border: "none",
+                              background: "transparent",
+                              color: "inherit",
+                              cursor: "pointer",
+                              fontSize: 11,
+                              padding: 0,
+                              textDecoration: "underline"
+                            }}
+                          >
+                            削除
+                          </button>
+                        </div>
                       </article>
                     ))
                   )}
@@ -3363,82 +3550,135 @@ export default function HomePage() {
           <section
             style={{
               border: `1px solid var(--border)`,
-              borderRadius: 18,
-              padding: "0.9rem",
+              borderRadius: 14,
+              padding: "0.7rem",
               background: "var(--panel)",
               display: "flex",
               flexDirection: "column",
-              gap: "0.75rem"
+              gap: "0.5rem",
+              position: "relative"
             }}
+            ref={pageMenuRef}
           >
-            <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
               <strong style={{ fontSize: 14 }}>{boards.find((board) => board.id === selectedBoardId)?.name ?? ""}</strong>
-              <button
-                type="button"
-                onClick={handleAddPage}
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <button
+                  type="button"
+                  onClick={handleAddPage}
+                  style={{
+                    border: "none",
+                    background: "var(--accent)",
+                    color: "var(--accent-contrast)",
+                    borderRadius: 999,
+                    padding: "0.2rem 0.6rem",
+                    fontSize: 12,
+                    cursor: "pointer",
+                    whiteSpace: "nowrap"
+                  }}
+                >
+                  新規
+                </button>
+              </div>
+            </header>
+            <button
+              type="button"
+              onClick={() => setIsPageMenuOpen((prev) => !prev)}
+              aria-expanded={isPageMenuOpen}
+              style={{
+                width: "100%",
+                borderRadius: 10,
+                border: `1px solid var(--border)`,
+                background: "var(--panel-minor)",
+                color: "inherit",
+                padding: "0.55rem 0.65rem",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                fontSize: 13,
+                cursor: "pointer",
+                textAlign: "left"
+              }}
+            >
+              <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span>{boards.find((board) => board.id === selectedBoardId)?.icon}</span>
+                <span>{pagesForBoard.find((p) => p.id === activePageId)?.title ?? "ページを選択"}</span>
+              </span>
+              <span aria-hidden="true" style={{ fontSize: 12 }}>{isPageMenuOpen ? "▾" : "▸"}</span>
+            </button>
+            {isPageMenuOpen && (
+              <div
                 style={{
-                  border: "none",
-                  background: "var(--accent)",
-                  color: "var(--accent-contrast)",
-                  borderRadius: 999,
-                  padding: "0.2rem 0.6rem",
-                  fontSize: 12,
-                  cursor: "pointer"
+                  position: "absolute",
+                  left: 0,
+                  right: 0,
+                  top: "100%",
+                  marginTop: 6,
+                  background: "var(--panel)",
+                  borderRadius: 12,
+                  border: `1px solid var(--border)`,
+                  boxShadow: "0 18px 35px rgba(15,23,42,0.25)",
+                  maxHeight: 340,
+                  overflowY: "auto",
+                  zIndex: 15,
+                  padding: 8
                 }}
               >
-                新規
-              </button>
-            </header>
-            <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 380, overflowY: "auto" }}>
-              {pagesForBoard.length === 0 && <p style={{ opacity: 0.7 }}>このボードにページはありません。</p>}
-              {pagesForBoard.map((page) => {
-                const isCurrent = page.id === activePageId;
-                return (
-                  <article
-                    key={page.id}
-                    role="button"
-                    tabIndex={page.boardId === "ranking" ? -1 : 0}
-                    onClick={() => handlePageSelect(page.id)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" || event.key === " ") {
-                        event.preventDefault();
+                {pagesForBoard.length === 0 && <p style={{ opacity: 0.7, margin: 0 }}>このボードにページはありません。</p>}
+                {pagesForBoard.map((page) => {
+                  const isCurrent = page.id === activePageId;
+                  return (
+                    <article
+                      key={page.id}
+                      role="button"
+                      tabIndex={page.boardId === "ranking" ? -1 : 0}
+                      onClick={() => {
                         handlePageSelect(page.id);
-                      }
-                    }}
-                    style={{
-                      border: isCurrent ? `2px solid var(--accent)` : `1px solid var(--border)`,
-                      borderRadius: 12,
-                      padding: "0.75rem",
-                      background: isCurrent ? "var(--panel-focus)" : "var(--panel-minor)",
-                      display: "flex",
-                      flexDirection: "column",
-                      gap: 6,
-                      cursor: "pointer"
-                    }}
-                  >
-                    <strong>{page.title}</strong>
-                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, opacity: 0.75 }}>
-                      <span>{boards.find((board) => board.id === page.boardId)?.name}</span>
-                      <button
-                        type="button"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          handleDeletePage(page.id);
-                        }}
-                        style={{
-                          border: "none",
-                          background: "transparent",
-                          color: "inherit",
-                          cursor: "pointer"
-                        }}
-                      >
-                        削除
-                      </button>
-                    </div>
-                  </article>
-                );
-              })}
-            </div>
+                        setIsPageMenuOpen(false);
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          handlePageSelect(page.id);
+                          setIsPageMenuOpen(false);
+                        }
+                      }}
+                      style={{
+                        border: isCurrent ? `2px solid var(--accent)` : `1px solid var(--border)`,
+                        borderRadius: 10,
+                        padding: "0.6rem 0.65rem",
+                        background: isCurrent ? "var(--panel-focus)" : "var(--panel-minor)",
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 6,
+                        cursor: "pointer",
+                        marginBottom: 6
+                      }}
+                    >
+                      <strong>{page.title}</strong>
+                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, opacity: 0.75 }}>
+                        <span>{boards.find((board) => board.id === page.boardId)?.name}</span>
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            handleDeletePage(page.id);
+                          }}
+                          style={{
+                            border: "none",
+                            background: "transparent",
+                            color: "inherit",
+                            cursor: "pointer"
+                          }}
+                        >
+                          削除
+                        </button>
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            )}
           </section>
           <div
             aria-hidden="true"
@@ -3450,7 +3690,7 @@ export default function HomePage() {
           <div
             style={{
               position: "relative",
-              marginTop: 8
+              marginTop: 6
             }}
           >
             <button
@@ -3459,11 +3699,11 @@ export default function HomePage() {
               aria-expanded={isProjectMenuOpen}
               style={{
                 width: "100%",
-                borderRadius: 12,
+                borderRadius: 10,
                 border: `1px solid var(--border)`,
                 background: "var(--panel-minor)",
                 color: "inherit",
-                padding: "0.65rem 0.75rem",
+                padding: "0.5rem 0.6rem",
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "space-between",
@@ -3483,89 +3723,18 @@ export default function HomePage() {
             aria-hidden="true"
             style={{
               borderTop: `2px solid var(--border)`,
-              margin: "0.75rem 0"
+              margin: "0.5rem 0"
             }}
           />
           <section
             style={{
               border: `1px solid var(--border)`,
-              borderRadius: 18,
-              padding: "0.9rem",
+              borderRadius: 14,
+              padding: "0.65rem",
               background: "var(--panel)",
               display: "flex",
               flexDirection: "column",
-              gap: "0.75rem"
-            }}
-          >
-            <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <FcSettings size={18} aria-hidden="true" />
-                <strong style={{ fontSize: 14 }}>設定</strong>
-              </div>
-            </header>
-            <button
-              type="button"
-              onClick={toggleTheme}
-              style={{
-                borderRadius: 10,
-                border: `1px solid var(--border)`,
-                background: "var(--panel-minor)",
-                color: "inherit",
-                padding: "0.5rem 0.8rem",
-                cursor: "pointer",
-                fontSize: 12,
-                textAlign: "left"
-              }}
-            >
-              {theme === "dark" ? "☀️ ライトモード" : "🌙 ダークモード"}
-            </button>
-            <button
-              type="button"
-              onClick={handleFirebaseAuthLogin}
-              style={{
-                borderRadius: 10,
-                border: `1px solid var(--border)`,
-                background: "var(--panel-minor)",
-                color: "inherit",
-                padding: "0.5rem 0.8rem",
-                cursor: "pointer",
-                fontSize: 12,
-                textAlign: "left"
-              }}
-            >
-              GoogleでFirebaseにサインイン
-            </button>
-            <button
-              type="button"
-              onClick={handleFirebaseCheck}
-              disabled={isCheckingFirebase}
-              style={{
-                borderRadius: 10,
-                border: `1px solid var(--border)`,
-                background: "var(--panel-minor)",
-                color: "inherit",
-                padding: "0.5rem 0.8rem",
-                cursor: isCheckingFirebase ? "not-allowed" : "pointer",
-                fontSize: 12,
-                textAlign: "left",
-                opacity: isCheckingFirebase ? 0.7 : 1
-              }}
-            >
-              {isCheckingFirebase ? "Firebase確認中..." : "Firebase接続確認"}
-            </button>
-            {firebaseStatus && (
-              <p style={{ margin: 0, fontSize: 12, color: "var(--fg-muted)" }}>{firebaseStatus}</p>
-            )}
-          </section>
-          <section
-            style={{
-              border: `1px solid var(--border)`,
-              borderRadius: 18,
-              padding: "0.9rem",
-              background: "var(--panel)",
-              display: "flex",
-              flexDirection: "column",
-              gap: "0.65rem"
+              gap: "0.5rem"
             }}
           >
             <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -3599,11 +3768,11 @@ export default function HomePage() {
                       }
                 }
                 style={{
-                  borderRadius: 10,
+                  borderRadius: 9,
                   border: `1px solid var(--border)`,
                   background: "var(--panel-minor)",
                   color: "inherit",
-                  padding: "0.45rem 0.9rem",
+                  padding: "0.4rem 0.7rem",
                   cursor: "pointer",
                   fontSize: 12,
                   whiteSpace: "nowrap"
@@ -3612,6 +3781,40 @@ export default function HomePage() {
                 {isLoggedIn ? "ログアウト" : "ログイン"}
               </button>
             </div>
+          </section>
+          <section
+            style={{
+              border: `1px solid var(--border)`,
+              borderRadius: 14,
+              padding: "0.65rem",
+              background: "var(--panel)",
+              display: "flex",
+              flexDirection: "column",
+              gap: "0.5rem"
+            }}
+          >
+            <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <FcSettings size={18} aria-hidden="true" />
+                <strong style={{ fontSize: 14 }}>設定</strong>
+              </div>
+            </header>
+            <button
+              type="button"
+              onClick={toggleTheme}
+              style={{
+                borderRadius: 9,
+                border: `1px solid var(--border)`,
+                background: "var(--panel-minor)",
+                color: "inherit",
+                padding: "0.45rem 0.7rem",
+                cursor: "pointer",
+                fontSize: 12,
+                textAlign: "left"
+              }}
+            >
+              {theme === "dark" ? "☀️ ライトモード" : "🌙 ダークモード"}
+            </button>
           </section>
           </>
         )}
