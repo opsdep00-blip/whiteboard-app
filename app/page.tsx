@@ -1337,13 +1337,11 @@ export default function HomePage() {
     try {
       if (pendingConflict.kind === "project") {
         const local = pendingConflict.local as Project;
-        const remoteVersion = typeof (pendingConflict.remote as Project).version === "number" ? (pendingConflict.remote as Project).version : 0;
-        const next = { ...local, version: remoteVersion, updatedAt: nowIso() };
+        const next = { ...local, updatedAt: nowIso() };
         await persistProjectWithVersion(next, currentOwnerId);
       } else {
         const local = pendingConflict.local as Page;
-        const remoteVersion = typeof (pendingConflict.remote as Page).version === "number" ? (pendingConflict.remote as Page).version : 0;
-        const next = { ...local, version: remoteVersion, updatedAt: nowIso() } as Page;
+        const next = { ...local, updatedAt: nowIso() } as Page;
         await persistPageWithVersion(next, currentOwnerId);
       }
       // Firestoreから最新データを再取得して同期
