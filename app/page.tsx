@@ -1565,11 +1565,14 @@ export default function HomePage() {
   );
 
   const handleDeletePage = useCallback(
-        // Firestoreからも削除
-        if (currentOwnerId) {
-          const ref = doc(db, "pages", pageId);
-          deleteDoc(ref).catch((e) => console.error("Firestoreページ削除失敗", e));
-        }
+    (pageId: string) => {
+      // Firestoreからも削除
+      if (currentOwnerId) {
+        const ref = doc(db, "pages", pageId);
+        deleteDoc(ref).catch((e) => console.error("Firestoreページ削除失敗", e));
+      }
+      // ...既存のローカル削除処理...
+    },
     (pageId: string) => {
       setPages((prev) => {
         const next = prev.filter((page) => page.id !== pageId);
