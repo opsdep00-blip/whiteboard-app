@@ -3696,7 +3696,9 @@ export default function HomePage() {
                   </div>
                 </header>
                 <textarea
-                  ref={el => (rankingTextareaRefs.current[item.id] = el)}
+                  ref={el => {
+                    rankingTextareaRefs.current[item.id] = el;
+                  }}
                   value={item.body}
                   onChange={event => {
                     handleRankingItemBodyChange(item.id, event.target.value);
