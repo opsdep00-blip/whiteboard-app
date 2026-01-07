@@ -3528,6 +3528,23 @@ export default function HomePage() {
     );
   };
 
+  // textareaの高さ自動調整用ref（ランキングカード用）
+  const rankingTextareaRefs = useRef<Record<string, HTMLTextAreaElement | null>>({});
+  // textareaの高さを内容に合わせて調整
+  const autoResizeRanking = (id: string) => {
+    const ref = rankingTextareaRefs.current[id];
+    if (ref) {
+      ref.style.height = "auto";
+      ref.style.height = ref.scrollHeight + "px";
+    }
+  };
+  // ランキングページのtextarea高さを自動調整
+  useEffect(() => {
+    if (isRankingPage(activePage)) {
+      activePage.items.forEach((item) => autoResizeRanking(item.id));
+    }
+  }, [activePage]);
+
   const renderRanking = (page: RankingPage) => {
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}>
@@ -3679,9 +3696,13 @@ export default function HomePage() {
                   </div>
                 </header>
                 <textarea
+                  ref={el => (rankingTextareaRefs.current[item.id] = el)}
                   value={item.body}
-                  onChange={(event) => handleRankingItemBodyChange(item.id, event.target.value)}
-                  rows={4}
+                  onChange={event => {
+                    handleRankingItemBodyChange(item.id, event.target.value);
+                    autoResizeRanking(item.id);
+                  }}
+                  rows={1}
                   style={{
                     borderRadius: 12,
                     border: `1px solid var(--border)`,
@@ -3690,7 +3711,8 @@ export default function HomePage() {
                     padding: "0.6rem",
                     fontSize: 14,
                     lineHeight: 1.5,
-                    resize: "vertical"
+                    resize: "none",
+                    overflow: "hidden"
                   }}
                 />
               </article>
